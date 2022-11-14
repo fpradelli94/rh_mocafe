@@ -1,8 +1,8 @@
+# Simulating Retinal Hemangioblastoma with FEniCS and Mocafe
+
 <p align="center">
   <img src=".thumbs/MovieS1.gif" />
 </p>
-
-# Simulating Retinal Hemangioblastoma with FEniCS and Mocafe
 
 **************************************************************************
 
