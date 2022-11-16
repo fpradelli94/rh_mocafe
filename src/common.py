@@ -348,7 +348,8 @@ def resume_simulation(resume_from: str,
                                                       "*.ipynb_checkpoints*",
                                                       "sif",
                                                       "visualization",
-                                                      "*pycache*"))
+                                                      "*pycache*",
+                                                      ".thumbs"))
     comm_world.Barrier()
 
     # setup logger
@@ -617,7 +618,8 @@ def run_simulation(spatial_dimension: int,
                                                       "*.ipynb_checkpoints*",
                                                       "sif",
                                                       "visualization",
-                                                      "*pycache*"))
+                                                      "*pycache*",
+                                                      ".thumbs"))
     comm_world.Barrier()
 
     # setup logger
