@@ -7,11 +7,7 @@
 **************************************************************************
 
 The materials contained in this folder allow the reproduction of the simulations of RH development
-and angiogenesis with FEniCS and Mocafe. 
-
-> :warning: Notice that 3D simulations require a considerable computational effort, so consider using an 
-> appropriate machine to reproduce that. For instance, it required about 24 h and about 150 GB of RAM to simulate 
-> 300 steps of tumor development and angiogenesis.
+and angiogenesis with FEniCS and Mocafe.
 
 ## Quick instructions
 Modify the `main.py` script according to your needs to run a simulation. To ensure full reproducibility, we recommend 
@@ -37,6 +33,10 @@ If you don’t have Singularity installed, just follow the instructions provided
 
 By default, the simulation output will be stored in `saved_sim`. For a detailed explanation of the generated files, 
 see section "Simulation output".
+
+> :warning: Notice that 3D simulations require a considerable computational effort, so consider using an 
+> appropriate machine to reproduce that. For instance, it required about 24 h and about 150 GB of RAM to simulate 
+> 300 steps of tumor development and angiogenesis.
 
 ## Slurm integration
 Our code is compatible with [slurm](https://slurm.schedmd.com/documentation.html). If you use slurm to run
