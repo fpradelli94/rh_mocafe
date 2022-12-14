@@ -90,7 +90,8 @@ Useful to check the exact code used to generate the results.
   - `sim_info.html`: info regarding the simulation [^2]
   - `sim_parameters.csv`: the parameters used in the simulation.
 
-## GitHub and Zenodo
+## GitHub and Zenodo [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.7330072.svg)](https://doi.org/10.5281/zenodo.7330072)
+
 This repository is available both on GitHub or on Zenodo. The GitHub version is meant to clone and reproduce the 
 results. On the Zenodo repository, you can access some of the generated output of the code, and the simulation 
 results that we used in our manuscript. See the section "Repository folders" (below) for additional info.
