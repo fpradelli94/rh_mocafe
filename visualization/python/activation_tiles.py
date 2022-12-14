@@ -50,7 +50,7 @@ ureg = UnitRegistry()
 load_arbitrary_units(ureg, pd.read_csv("../../notebooks/out/g_parameters.csv", index_col="name"),
                      sau_name="Space Arbitrary Unit",
                      tau_name="Time Arbitrary Unit",
-                     afau_name="T_s")
+                     afau_name="AFs Arbitrary Unit")
 
 # convert colums
 td_col_name, = [col_name for col_name in indata.columns if "tumor_diameter" in col_name]
