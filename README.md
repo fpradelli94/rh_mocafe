@@ -10,8 +10,8 @@ The materials contained in this folder allow the reproduction of the simulations
 and angiogenesis with FEniCS and Mocafe.
 
 ## Quick instructions
-Modify the `main.py` script according to your needs to run a simulation. To ensure full reproducibility, we recommend 
-to use [Singularity](https://github.com/sylabs/singularity):
+The full code to reproduce our results and to test our implementation is contained in  `main.py`. 
+To ensure full reproducibility, we recommend to use [Singularity](https://github.com/sylabs/singularity):
 
 ```shell
 # pull container
@@ -50,6 +50,8 @@ srun singularity exec sif/mocafe_v1-5-0.sif python3 main.py -slurm_job_id $SLURM
 ex=$?
 ```
 
+You can change the script according to your needs.
+
 ## Simulation output
 The result of a simulation is a folder with the following structure:
 ```shell
@@ -68,7 +70,7 @@ The result of a simulation is a folder with the following structure:
 ├── tipcells.h5
 └── tipcells.xdmf
 ```
-Where the `*.xdmf` and `*.h5` files are the actual simulation output. More precisely:
+Where the `*.xdmf` and `*.h5` files are the actual simulation outputs. More precisely:
 
 | Files                            | Content                                       |
 |----------------------------------|-----------------------------------------------|
@@ -80,10 +82,10 @@ Where the `*.xdmf` and `*.h5` files are the actual simulation output. More preci
 
 You can load these file in ParaView to visualize them. [^1]
 
-There are also three folders:
+There are also three additional folders:
 - `0_reproduce` contains a copy of the script used to generate the simulation. 
 Useful to check the exact code used to generate the results.
-- `resume` contains the data to resume the simulation. See `main.py` for an example.
+- `resume` contains the data to resume the simulation (i.e. start a new simulation using the end of another simulation as initial condition). See `main.py` for an example.
 - `sim_info` contains:
   - `incremental_tipcells.json`: data for every tip cell at each time step.
   - `mesh_parameters.csv`: info regarding the mesh used for the simulation.
@@ -93,7 +95,7 @@ Useful to check the exact code used to generate the results.
 ## GitHub and Zenodo [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.7330072.svg)](https://doi.org/10.5281/zenodo.7330072)
 
 This repository is available both on GitHub or on Zenodo. The GitHub version is meant to clone and reproduce the 
-results. On the Zenodo repository, you can access some of the generated output of the code, and the simulation 
+results. On the Zenodo repository, you can access to the generated outputs of the code, and the simulation 
 results that we used in our manuscript. See the section "Repository folders" (below) for additional info.
 
 ## Structure of this repository
@@ -113,7 +115,7 @@ This repository contains several folders:
 Let's see them one by one: 
 
 ### :file_folder: `input_images`
-Contains pateint-specific images, derived from the Optical Coherence Tomography Angiography. 
+Contains patient-specific images, derived from the Optical Coherence Tomography Angiography. 
 
 They are used in the program to generate the initial condition for the simulation.
 
@@ -141,7 +143,7 @@ Also, you can consider using the visualization script provided in `visualization
 On Zenodo, contains the Mocafe Singularity container used to run the simulations. It is recommended to use the same container
 to ensure reproducibility.
 
-To access the same container, just pull it from the cloud library:
+The recommended way to access the same container is to pull it from the cloud library:
 
 ```shell
 singularity build sif/mocafe_v1-5-0.sif library://fpradelli94/mocafe/mocafe:1.5.0
@@ -151,7 +153,7 @@ singularity build sif/mocafe_v1-5-0.sif library://fpradelli94/mocafe/mocafe:1.5.
 Contains the source code used in the `main.py` script. 
 
 ### :file_folder: `visualization`
-Contains scripts and data related to results visualization. There are two sub-folders: `paraview` and `python`
+Contains scripts and data related to the results' visualization. There are two sub-folders: `paraview` and `python`
 
 1. `paraview`
 
@@ -159,7 +161,7 @@ Contains a script, `section.py`, to visualize a simulation in 3D with [ParaView]
 It is the same used to generate the thumbnail of this `README`. It only works with 3D simulations and with ParaView >5.9.0.
 
 To use the script, open ParaView and, on the View tab, select "Python Shell". 
-A new window will appear with a botton "Run Script". Press the button and select the file `setion.py`.
+A new window will appear with a button "Run Script". Press the button and select the file `setion.py`.
 
 If the script runs correctly, it will ask for two inputs: the absolute paths of the simulation's `c.xdmf` file 
 and of the `phi.xdmf` file. Copy and paste them in the box that will appear and let ParaView handle the rest.
@@ -172,7 +174,7 @@ Contains the scripts used to produce some plots reported in the manuscript. More
 
 - `activation_tiles.py`, which generates a tiles plot of the parameters leading to angiognesis (Fig. 3 of the manuscript)
 using the table `sim_index.csv`.
-- `tipcells_in_time.py`, which generates a plot of the number of tipcells at any simulation step (like in Fig. 4 of the 
+- `tipcells_in_time.py`, which generates a plot of the number of tip cells at any simulation step (like in Fig. 4 of the 
 manuscript).
 
 ## Meta
@@ -186,4 +188,4 @@ To view a copy of this license, visit http://creativecommons.org/licenses/by-nc/
 
 [^1]: Don't know how? See examples in the [Mocafe Demo gallery](https://biocomputingup.github.io/mocafe/build/html/demo_doc/angiogenesis_3d.html#visualize-the-result-with-paraview)
 
-[^2]: For an example, see [Mocafe Demo gallery](https://biocomputingup.github.io/mocafe/build/html/demo_doc/multiple_pc_simulations.html#sphx-glr-demo-doc-multiple-pc-simulations-py))
+[^2]: For an example, see [Mocafe Demo gallery](https://biocomputingup.github.io/mocafe/build/html/demo_doc/multiple_pc_simulations.html#sphx-glr-demo-doc-multiple-pc-simulations-py)
