@@ -127,7 +127,7 @@ def reproduce_results():
     # run simulation
     run_simulation(spatial_dimension=3,
                    sim_parameters=sim_parameters,
-                   steps=200,
+                   steps=2,
                    save_rate=10,
                    out_folder_name="Fig2",
                    sim_rationale=f"Reproducing simulation in Fig 2",
@@ -158,7 +158,7 @@ def reproduce_results():
     sim_parameters = Parameters(standard_parameters_df)
 
     # set steps number
-    steps = 300
+    steps = 2
 
     # compute initial tumor diameter, knowing that the final correspond to 600 um
     td_f = sim_parameters.get_value("max_tumor_diameter")  # correspond to 600 um
@@ -177,7 +177,7 @@ def reproduce_results():
         run_simulation(spatial_dimension=3,
                        sim_parameters=sim_parameters,
                        steps=steps,
-                       save_rate=10,
+                       save_rate=20,
                        out_folder_name=sim_folder,
                        sim_rationale=f"Reproducing simulation in {sim_folder}",
                        slurm_job_id=slurm_job_id)
@@ -193,7 +193,7 @@ def reproduce_results():
     sim_parameters = Parameters(standard_parameters_df)
 
     # set steps number
-    steps = 300
+    steps = 2
 
     # compute initial tumor diameter, knowing that the final correspond to 600 um
     td_f = sim_parameters.get_value("max_tumor_diameter")  # correspond to 600 um
@@ -215,7 +215,7 @@ def reproduce_results():
 
 
 def main():
-    tutorial_2d()
+    reproduce_results()
 
 
 if __name__ == "__main__":
