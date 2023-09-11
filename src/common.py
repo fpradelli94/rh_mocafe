@@ -1,7 +1,6 @@
 """
 Contains methods and classes to run and resume simulations in 2D and 3D
 """
-
 import json
 import fenics
 import time
@@ -29,8 +28,11 @@ from src.simulation2d import compute_2d_mesh_for_patient
 from src.simulation3d import compute_3d_mesh_for_patient, compute_3d_c_0
 
 
+# MPI variables
 comm_world = fenics.MPI.comm_world
 rank = comm_world.Get_rank()
+
+# Patterns ignored when copying code after simulation
 ignored_patterns = ["README.md",
                     "saved_sim*",
                     "*.ipynb_checkpoints*",
