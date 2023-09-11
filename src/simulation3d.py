@@ -5,8 +5,9 @@ import fenics
 import pandas as pd
 import pint
 import numpy as np
-from PIL import Image
-from typing import Dict
+import logging
+from pathlib import Path
+from typing import Dict, Tuple
 import skimage.io as io
 from mocafe.fenut.parameters import Parameters
 from src.expressions import Vessel3DReconstruction
@@ -15,12 +16,72 @@ from src.expressions import Vessel3DReconstruction
 comm_world = fenics.MPI.comm_world
 rank = comm_world.Get_rank()
 
+# get logger
+logger = logging.getLogger(__name__)
+ch = logging.StreamHandler()
+formatter = logging.Formatter(f"p{rank}:%(name)s:%(levelname)s: %(message)s")
+ch.setFormatter(formatter)
+logger.addHandler(ch)
 
-def compute_3d_mesh_for_patient(
+
+def get_3d_mesh_for_patient(
         parameters_df: pd.DataFrame,
         local_ureg: pint.UnitRegistry,
-        patient_parameters: Dict
-):
+        patient_parameters: Dict,
+        mesh_file: Path,
+        mesh_parameters_file: Path,
+        recompute_mesh) -> Tuple[fenics.BoxMesh, Parameters]:
+    """
+    Get a ``BoxMesh`` suitable for the simulation, given the patient parameters listed in the given
+    dictionary.
+
+    Under the hood, it generates the mesh if it does not exist in the `mesh_file` otherwise, it loads it
+    directly from the mesh file.
+
+    :param parameters_df: parameters dataframe
+    :param local_ureg: Unit registry
+    :param patient_parameters: parameters for the patient
+    :param mesh_file: the mesh file. It is empty if the mesh has never been computed.
+    :param mesh_parameters_file: the file containing the mesh_parameters. It is empty if the mesh has never been
+    computed.
+    :param recompute_mesh: set to True if it is necessary to recompute the mesh, even if the mesh_file contains a mesh.
+    :return: the computed mesh and a Dict containing the mesh data
+    """
+
+    # if mesh_file and mesh_parameters_file exist, and it is not necesssary to recompute the mesh,
+    # just load the mesh parameters. Else, compute the mesh and store it.
+    if (mesh_file.exists() and mesh_parameters_file.exists()) and (recompute_mesh is False):
+        # load mesh parameters
+        mesh_parameters: Parameters = Parameters(pd.read_csv(mesh_parameters_file))
+
+    else:
+        # generate mesh
+        logger.info(f"Computing mesh ...")
+        mesh, mesh_parameters = _compute_3d_mesh_for_patient(parameters_df,
+                                                             local_ureg,
+                                                             patient_parameters)
+        # save mesh
+        with fenics.XDMFFile(str(mesh_file.resolve())) as outfile:
+            outfile.write(mesh)
+
+        # save mesh parameters
+        mesh_parameters.as_dataframe().to_csv(mesh_parameters_file)
+
+        # delete mesh
+        del mesh
+
+    # in any case, reload the mesh (to ensure consistent distribution of the dofs)
+    mesh = fenics.Mesh()
+    with fenics.XDMFFile(str(mesh_file.resolve())) as infile:
+        infile.read(mesh)
+
+    return mesh, mesh_parameters
+
+
+def _compute_3d_mesh_for_patient(
+        parameters_df: pd.DataFrame,
+        local_ureg: pint.UnitRegistry,
+        patient_parameters: Dict) -> Tuple[fenics.BoxMesh, Parameters]:
     """
     Generate a ``BoxMesh`` suitable for the simulation, given the patient parameters listed in the given
     dictionary
@@ -105,8 +166,38 @@ def compute_3d_mesh_for_patient(
     return mesh, Parameters(pd.DataFrame(mesh_parameters))
 
 
-def compute_3d_c_0(c_old: fenics.Function,
-                   mesh_parameters: Parameters):
+def get_3d_c0(c_old: fenics.Function,
+              mesh_parameters: Parameters,
+              c0_xdmf: Path,
+              recompute_c0: bool) -> None:
+    """
+    Get the 3d initial condition for c0. If c0_xdmf is empty, it computes the initial condition and saves it in the
+    file for future reuse.
+
+    :param c_old: FEniCS function to store initial condition
+    :param mesh_parameters: mesh parameters (used in the computation)
+    :param c0_xdmf: file containing c0 (if already computed once)
+    :param recompute_c0: force the function to recompute c0 even if c0_xdmf is not empty.
+    """
+
+    # define c0_label in xdmf file
+    c0_label = "c0"
+
+    # if c0 file exists and it is not necessary to recompute it, load it. Else compute it.
+    if c0_xdmf.exists() and (recompute_c0 is False):
+        with fenics.XDMFFile(str(c0_xdmf.resolve())) as infile:
+            infile.read_checkpoint(c_old, c0_label, 0)
+    else:
+        # compute c0
+        logger.info("Computing c0...")
+        _compute_3d_c_0(c_old, mesh_parameters)
+        # store c0
+        with fenics.XDMFFile(str(c0_xdmf.resolve())) as outfile:
+            outfile.write_checkpoint(c_old, c0_label, 0, fenics.XDMFFile.Encoding.HDF5, False)
+
+
+def _compute_3d_c_0(c_old: fenics.Function,
+                    mesh_parameters: Parameters):
     """
     Computes c initial condition in 3D
     """

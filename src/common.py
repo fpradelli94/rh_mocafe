@@ -11,7 +11,6 @@ from itertools import product
 from pint import Quantity, UnitRegistry
 from tqdm import tqdm
 import numpy as np
-from PIL import Image
 import shutil
 from typing import Dict
 from petsc4py import PETSc
@@ -25,7 +24,7 @@ from mocafe.fenut.log import confgure_root_logger_with_standard_settings
 import src.forms
 from src.expressions import get_growing_RH_expression, BWImageExpression
 from src.simulation2d import compute_2d_mesh_for_patient
-from src.simulation3d import compute_3d_mesh_for_patient, compute_3d_c_0
+from src.simulation3d import get_3d_mesh_for_patient, get_3d_c0
 
 
 # MPI variables
@@ -87,45 +86,6 @@ def load_arbitrary_units(
                       f"{parameters_df.loc[afau_name, 'real_value']} * {parameters_df.loc[afau_name, 'real_um']} = "
                       f"afau")
 
-    return local_ureg
-
-
-def estimate_pixel_size(
-        image_path: str,
-        tumor_diameter: Quantity,
-        local_ureg: UnitRegistry
-):
-    """
-    Estimate the real dimension of the input image pixels given the tumor diameter. The pixels are added to the local
-    unit registry to be used for Mesh Generation.
-
-    The input image should be black and white, with white pixels representing the tumor and black pixels the
-    surrounding tissues. Any grey between included in [1, 255] is converted to 255 to estimate the area, but the
-    original image is not modified.
-
-    :param image_path: path of the input image
-    :param tumor_diameter: ``Quantity`` indicating the tumor diameter
-    :local_ureg: the Unit Registry to update
-    :return: the updated Unit Registry
-    """
-    # read tumour selection image as grayscale
-    image = Image.open(image_path).convert('L')
-    # convert to numpy array
-    np_image = np.array(image)
-    # transform every non-zero pixel to 1
-    np_image[np_image > 0] = 1.
-    # get the total number of pixels
-    area_pxl = np.sum(np_image)
-    # estimate the exact area
-    area_um2 = np.pi * ((tumor_diameter / 2) ** 2)
-    # get the area for each pixel
-    um2_pxl = area_um2 / area_pxl
-    # define pxl as unit of measure
-    local_ureg.define(f"Pixel = {um2_pxl} = pxl")
-    # get pixel size length
-    pxl_side_um = np.sqrt(um2_pxl)
-    # define pxl side as unit of measure
-    local_ureg.define(f"Pixel Side = {pxl_side_um} = pxls")
     return local_ureg
 
 
@@ -674,46 +634,22 @@ def run_simulation(spatial_dimension: int,
     # ---------------------------------------------------------------------------------------------------------------- #
     #                                                 Mesh Definition                                                   
     # ---------------------------------------------------------------------------------------------------------------- #
-    # max_tumor_diameter = 600 * local_ureg("um")
-    # local_ureg = estimate_pixel_size("input_images/RH_initial_selection.png",
-    #                                  max_tumor_diameter,
-    #                                  local_ureg)
     # define mesh_file
     mesh_xdmf: Path = mesh_folder / Path("mesh.xdmf")
     # define mesh_parameters file
     mesh_parameters_file: Path = mesh_folder / Path("mesh_parameters.csv")
 
-    # if mesh_file and mesh_parameters_file exist, and it is not necesssary to recompute the mesh,
-    # just load the mesh parameters. Else, compute the mesh and store it.
-    if (mesh_xdmf.exists() and mesh_parameters_file.exists()) and (recompute_mesh is False):
-        # load mesh parameters
-        mesh_parameters: Parameters = Parameters(pd.read_csv(mesh_parameters_file))
-
+    if spatial_dimension == 2:
+        mesh, mesh_parameters = compute_2d_mesh_for_patient(sim_parameters.as_dataframe(),
+                                                            local_ureg,
+                                                            patient_parameters)
     else:
-        # generate mesh
-        if spatial_dimension == 2:
-            mesh, mesh_parameters = compute_2d_mesh_for_patient(sim_parameters.as_dataframe(),
-                                                                local_ureg,
-                                                                patient_parameters)
-        else:
-            mpi_print("Computing mesh...")
-            mesh, mesh_parameters = compute_3d_mesh_for_patient(sim_parameters.as_dataframe(),
-                                                                local_ureg,
-                                                                patient_parameters)
-        # save mesh
-        with fenics.XDMFFile(str(mesh_xdmf.resolve())) as outfile:
-            outfile.write(mesh)
-
-        # save mesh parameters
-        mesh_parameters.as_dataframe().to_csv(mesh_parameters_file)
-
-        # delete mesh
-        del mesh
-
-    # in any case, reload the mesh (to ensure consistent distribution of the dofs)
-    mesh = fenics.Mesh()
-    with fenics.XDMFFile(str(mesh_xdmf.resolve())) as infile:
-        infile.read(mesh)
+        mesh, mesh_parameters = get_3d_mesh_for_patient(sim_parameters.as_dataframe(),
+                                                        local_ureg,
+                                                        patient_parameters,
+                                                        mesh_xdmf,
+                                                        mesh_parameters_file,
+                                                        recompute_mesh)
 
     # save mesh also in resume folder
     save_resume_info(resume_folder, mesh=mesh)
@@ -738,25 +674,10 @@ def run_simulation(spatial_dimension: int,
     else:
         # define c0 function
         c_old = fenics.Function(V.sub(0).collapse())
-
         # define c0 file
         c0_xdmf: Path = c0_folder / Path("c0.xdmf")
-
-        # define c0_label in xdmf file
-        c0_label = "c0"
-
-        # if c0 file exists and it is not necessary to recompute it, load it. Else compute it.
-        if c0_xdmf.exists() and (recompute_c0 is False):
-            with fenics.XDMFFile(str(c0_xdmf.resolve())) as infile:
-                infile.read_checkpoint(c_old, c0_label, 0)
-        else:
-            # compute c0
-            mpi_print("Computing c0...")
-            compute_3d_c_0(c_old, mesh_parameters)
-
-            # store c0
-            with fenics.XDMFFile(str(c0_xdmf.resolve())) as outfile:
-                outfile.write_checkpoint(c_old, c0_label, 0, fenics.XDMFFile.Encoding.HDF5, False)
+        # get 3d c0
+        get_3d_c0(c_old, mesh_parameters, c0_xdmf, recompute_c0)
 
     # name c_old
     c_old.rename("c", "capillaries")
@@ -941,6 +862,8 @@ def test_tip_cell_activation(spatial_dimension: int,
                              out_folder_mode: str = None,
                              slurm_job_id: int = None,
                              results_df: str = None,
+                             recompute_mesh: bool = False,
+                             recompute_c0: bool = False,
                              **kwargs):
     """
     Test if tip cells activate at first simulation step for a given set of parameters. The default ranges are those
@@ -964,6 +887,8 @@ def test_tip_cell_activation(spatial_dimension: int,
     :param vessels_no_discontinuities: use the vessels image without discontinuities
     :param results_df: give the dataframe where to save the tip cells activation results as input. Default is None.
     If None, a new dataframe will be created.
+    :param recompute_mesh: recompute the mesh for the 3d simulation. Default is False
+    :param recompute_c0: recompute the initial condition for the capillaries. Default is False.
     :param kwargs: give a parameter name and a range as input to test whether tip cells activation occurs in the given
     parameters range. Each parameter must be associated with a list (even if a single value is given).
     """
@@ -973,6 +898,16 @@ def test_tip_cell_activation(spatial_dimension: int,
     # set up folders
     data_folder = mansim.setup_data_folder(folder_path=f"{Path('saved_sim')}/{out_folder_name}",
                                            auto_enumerate=out_folder_mode)
+
+    # create 'mesh' folder to store the mesh
+    mesh_folder: Path = Path("./mesh")
+    if rank == 0:
+        mesh_folder.mkdir(exist_ok=True)
+
+    # create c0 folder to store the capillaries initial condition
+    c0_folder: Path = Path("./c0")
+    if rank == 0:
+        c0_folder.mkdir(exist_ok=True)
 
     # load arbitrary units
     local_ureg = load_arbitrary_units(local_ureg,
@@ -1030,19 +965,25 @@ def test_tip_cell_activation(spatial_dimension: int,
     lsp = {"ksp_type": "gmres", "pc_type": "gamg"}
 
     # --- Mesh definition
-    max_tumor_diameter = 600 * local_ureg("um")
-    local_ureg = estimate_pixel_size("input_images/RH_initial_selection.png",
-                                     max_tumor_diameter,
-                                     local_ureg)
+    # ---------------------------------------------------------------------------------------------------------------- #
+    #                                                 Mesh Definition
+    # ---------------------------------------------------------------------------------------------------------------- #
+    # define mesh_file
+    mesh_xdmf: Path = mesh_folder / Path("mesh.xdmf")
+    # define mesh_parameters file
+    mesh_parameters_file: Path = mesh_folder / Path("mesh_parameters.csv")
+
     if spatial_dimension == 2:
         mesh, mesh_parameters = compute_2d_mesh_for_patient(df_standard_params,
                                                             local_ureg,
                                                             patient_parameters)
     else:
-        mpi_print("Computing mesh...")
-        mesh, mesh_parameters = compute_3d_mesh_for_patient(df_standard_params,
-                                                            local_ureg,
-                                                            patient_parameters)
+        mesh, mesh_parameters = get_3d_mesh_for_patient(df_standard_params,
+                                                        local_ureg,
+                                                        patient_parameters,
+                                                        mesh_xdmf,
+                                                        mesh_parameters_file,
+                                                        recompute_mesh)
 
     # --- Spatial discretization
     mpi_print("Starting spatial discretization")
@@ -1056,9 +997,11 @@ def test_tip_cell_activation(spatial_dimension: int,
         c_old_expression = BWImageExpression(cb, [-1, 1], local_ureg)
         c_old = fenics.interpolate(c_old_expression, V.sub(0).collapse())
     else:
-        mpi_print("Computing c0...")
         c_old = fenics.Function(V.sub(0).collapse())
-        compute_3d_c_0(c_old, mesh_parameters)
+        # define c0 file
+        c0_xdmf: Path = c0_folder / Path("c0.xdmf")
+        # get 3d c0
+        get_3d_c0(c_old, mesh_parameters, c0_xdmf, recompute_c0)
 
     # -- Define gradient evaluator to compute grad_af
     ge = GradientEvaluator()
