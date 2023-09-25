@@ -46,19 +46,6 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 
-def mpi_print(msg: str, r: int = None):
-    """
-    Wrapper of the print function MPI-aware.
-    """
-    if r is None:
-        print(f"p{rank}: {msg}", file=sys.stdout)
-        sys.stdout.flush()
-    else:
-        if rank == r:
-            print(f"p{rank}: {msg}", file=sys.stdout)
-            sys.stdout.flush()
-
-
 def load_arbitrary_units(
         local_ureg: UnitRegistry,
         parameters_df: pd.DataFrame,
