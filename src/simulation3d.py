@@ -1,6 +1,8 @@
 """
 Code used only in 3D simulations
 """
+import sys
+
 import fenics
 import pandas as pd
 import pint
@@ -18,10 +20,7 @@ rank = comm_world.Get_rank()
 
 # get logger
 logger = logging.getLogger(__name__)
-ch = logging.StreamHandler()
-formatter = logging.Formatter(f"p{rank}:%(name)s:%(levelname)s: %(message)s")
-ch.setFormatter(formatter)
-logger.addHandler(ch)
+logger.setLevel(logging.DEBUG)
 
 
 def get_3d_mesh_for_patient(

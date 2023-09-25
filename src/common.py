@@ -4,6 +4,7 @@ Contains methods and classes to run and resume simulations in 2D and 3D
 import json
 import fenics
 import time
+import logging
 from pathlib import Path
 import sys
 import pandas as pd
@@ -39,6 +40,10 @@ ignored_patterns = ["README.md",
                     "visualization",
                     "*pycache*",
                     ".thumbs"]
+
+# get logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 def mpi_print(msg: str, r: int = None):
@@ -389,7 +394,7 @@ def resume_simulation(resume_from: str,
     # --- Weak form definition
     # define variable functions
     if spatial_dimension == 3:
-        mpi_print("Defining weak form...")
+        logger.info("Defining weak form...")
     u = fenics.Function(V)
     fenics.assign(u, [af_old, c_old, mu_old])
     af, c, mu = fenics.split(u)
@@ -403,7 +408,7 @@ def resume_simulation(resume_from: str,
 
     # --- Problem solution
     if spatial_dimension == 3:
-        mpi_print("Defining problem...")
+        logger.info("Defining problem...")
     # define Jacobian
     J = fenics.derivative(form, u)
     # define problem
@@ -431,7 +436,7 @@ def resume_simulation(resume_from: str,
 
     # log
     if spatial_dimension == 3:
-        mpi_print("Starting time iteration...")
+        logger.info("Starting time iteration...")
 
     # iterate in time
     for step in range(last_step + 1, last_step + steps + 1):
@@ -684,60 +689,59 @@ def run_simulation(spatial_dimension: int,
     c_xdmf.write(c_old, 0)
 
     # auxiliary fun for capillaries, initially set to 0
-    if spatial_dimension == 3:
-        mpi_print("Computing mu0...")
+    logger.info("Computing mu0...")
     mu_old = fenics.interpolate(fenics.Constant(0.), V.sub(0).collapse())
 
     # define initial condition for tumor
-    if spatial_dimension == 3:
-        mpi_print("Computing phi0...")
+    logger.info("Computing phi0...")
     phi_expression = get_growing_RH_expression(sim_parameters, mesh_parameters, 0, spatial_dimension)
     phi = fenics.interpolate(phi_expression, V.sub(0).collapse())
     phi.rename("phi", "retinal hemangioblastoma")
     phi_xdmf.write(phi, 0)
 
     # t_c_f_function (dynamic tip cell position)
-    if spatial_dimension == 3:
-        mpi_print("Computing t_c_f_function...")
+    logger.info("Computing t_c_f_function...")
     t_c_f_function = fenics.interpolate(fenics.Constant(0.), V.sub(0).collapse())
     t_c_f_function.rename("tcf", "tip cells function")
     tipcells_xdmf.write(t_c_f_function, 0)
 
     # af
-    if spatial_dimension == 3:
-        mpi_print("Computing af0...")
+    logger.info("Computing af0...")
     af_old = fenics.Function(V.sub(0).collapse())
     compute_af_0(af_old, V.sub(0).collapse(), phi, c_old, sim_parameters, lsp)
     af_old.rename("af", "angiogenic factor")
     af_xdmf.write(af_old, 0)
 
     # af gradient
-    if spatial_dimension == 3:
-        mpi_print("Computing grad_af0...")
+    logger.info("Computing grad_af0...")
     ge = GradientEvaluator()
     grad_af_old = fenics.Function(vec_V)
     ge.compute_gradient(af_old, vec_V, grad_af_old, lsp)
     grad_af_old.rename("grad_af", "angiogenic factor gradient")
     grad_af_xdmf.write(grad_af_old, 0)
 
-    # --- Weak form definition
+    # ---------------------------------------------------------------------------------------------------------------- #
+    # Weak form definition
+    # ---------------------------------------------------------------------------------------------------------------- #
+    logger.info("Defining weak form...")
+
     # define variable functions
-    if spatial_dimension == 3:
-        mpi_print("Defining weak form...")
     u = fenics.Function(V)
     fenics.assign(u, [af_old, c_old, mu_old])
     af, c, mu = fenics.split(u)
     # define test functions
     v1, v2, v3 = fenics.TestFunctions(V)
-    # bulid total form
+    # build total form
     af_form = src.forms.angiogenic_factors_form_eq(af, phi, c, v1, sim_parameters)
     capillaries_form = mocafe.angie.forms.angiogenesis_form_no_proliferation(c, c_old, mu, mu_old, v2, v3,
                                                                              sim_parameters)
     form = af_form + capillaries_form
 
-    # --- Problem solution
-    if spatial_dimension == 3:
-        mpi_print("Defining problem...")
+    # ---------------------------------------------------------------------------------------------------------------- #
+    # Simulation
+    # ---------------------------------------------------------------------------------------------------------------- #
+    logger.info("Defining problem...")
+
     # define Jacobian
     J = fenics.derivative(form, u)
     # define problem
@@ -751,21 +755,23 @@ def run_simulation(spatial_dimension: int,
     t = 0
     dt = sim_parameters.get_value("dt")
 
-    if rank == 0:
-        if slurm_job_id is not None:
-            pbar_file = open(f"slurm/{slurm_job_id}pbar.o", 'w')
-            pbar = tqdm(total=steps, ncols=100, desc=out_folder_name, file=pbar_file)
-        else:
-            pbar_file = None
-            pbar = tqdm(total=steps, ncols=100, desc=out_folder_name)
+    # set up error flag
+    runtime_error_occurred = False
+    error_msg = None
+
+    # set up pbar
+    if (slurm_job_id is not None) and (rank == 0):
+        pbar_file = open(f"slurm/{slurm_job_id}pbar.o", 'w')
     else:
-        pbar_file = None
-        pbar = None
+        pbar_file = sys.stdout
+    pbar = tqdm(total=steps,
+                ncols=100,
+                desc=out_folder_name,
+                file=pbar_file,
+                disable=True if rank != 0 else False)
 
     # log
-    if spatial_dimension == 3:
-        mpi_print("Starting time iteration...")
-
+    logger.info("Starting time iteration...")
     # iterate in time
     for step in range(1, steps + 1):
         # update time
@@ -788,27 +794,12 @@ def run_simulation(spatial_dimension: int,
         try:
             solver.solve(problem, u.vector())
         except RuntimeError as e:
-            # save sim data
-            mansim.save_sim_info(data_folder=report_folder,
-                                 parameters={"Sim Parameters:": sim_parameters, "Mesh parameters": mesh_parameters},
-                                 execution_time=time.time() - init_time,
-                                 sim_name=out_folder_name,
-                                 sim_description="RUNTIME ERROR OCCURRED. \n" + sim_rationale, error_msg=str(e))
-            # save parameters
-            sim_parameters.as_dataframe().to_csv(report_folder / Path("sim_parameters.csv"))
-            mesh_parameters.as_dataframe().to_csv(report_folder / Path("mesh_parameters.csv"))
-            # write files
-            af_xdmf.write(af_old, t)
-            c_xdmf.write(c_old, t)
-            grad_af_xdmf.write(grad_af_old, t)
-            phi_xdmf.write(phi, t)
-            # save tip cells current position
-            tipcells_xdmf.write(t_c_f_function, t)
-            save_resume_info(data_folder / Path("resume"),
-                             fnc_dict={"af": af_old, "c": c_old, "mu": mu_old, "phi": phi, "grad_af": grad_af_old},
-                             tip_cell_manager=tip_cell_manager)
-            # close iteration in time
-            return 1
+            # store error info
+            runtime_error_occurred = True
+            error_msg = str(e)
+            logger.error(error_msg)
+            # stop simulation
+            break
 
         # assign to old
         fenics.assign([af_old, c_old, mu_old], u)
@@ -819,7 +810,7 @@ def run_simulation(spatial_dimension: int,
         phi.assign(fenics.interpolate(phi_expression, V.sub(0).collapse()))
 
         # save
-        if (step % save_rate == 0) or (step == steps):
+        if (step % save_rate == 0) or (step == steps) or runtime_error_occurred:
             # write files
             af_xdmf.write(af_old, t)
             c_xdmf.write(c_old, t)
@@ -829,9 +820,9 @@ def run_simulation(spatial_dimension: int,
             tipcells_xdmf.write(t_c_f_function, t)
 
         # update progress bar
-        if rank == 0:
-            pbar.update(1)
+        pbar.update(1)
 
+    # close pbar file
     if (rank == 0) and (slurm_job_id is not None):
         pbar_file.close()
 
@@ -839,21 +830,25 @@ def run_simulation(spatial_dimension: int,
     save_resume_info(data_folder / Path("resume"),
                      fnc_dict={"af": af_old, "c": c_old, "mu": mu_old, "phi": phi, "grad_af": grad_af_old},
                      tip_cell_manager=tip_cell_manager)
-
     # save sim data
+    if runtime_error_occurred:
+        sim_description = "RUNTIME ERROR OCCURRED. \n" + sim_rationale
+    else:
+        sim_description = sim_rationale
     mansim.save_sim_info(data_folder=report_folder,
                          parameters={"Sim parameters:": sim_parameters,
                                      "Mesh parameters": mesh_parameters},
                          execution_time=time.time() - init_time,
                          sim_name=out_folder_name,
-                         sim_description=sim_rationale)
+                         sim_description=sim_description,
+                         error_msg=error_msg)
     # save parameters
     sim_parameters.as_dataframe().to_csv(report_folder / Path("sim_parameters.csv"))
     mesh_parameters.as_dataframe().to_csv(report_folder / Path("mesh_parameters.csv"))
 
     comm_world.Barrier()  # wait for all processes
 
-    return 0
+    return runtime_error_occurred
 
 
 def test_tip_cell_activation(spatial_dimension: int,
@@ -964,7 +959,6 @@ def test_tip_cell_activation(spatial_dimension: int,
     # --- Define linear solver parameters
     lsp = {"ksp_type": "gmres", "pc_type": "gamg"}
 
-    # --- Mesh definition
     # ---------------------------------------------------------------------------------------------------------------- #
     #                                                 Mesh Definition
     # ---------------------------------------------------------------------------------------------------------------- #
@@ -986,7 +980,7 @@ def test_tip_cell_activation(spatial_dimension: int,
                                                         recompute_mesh)
 
     # --- Spatial discretization
-    mpi_print("Starting spatial discretization")
+    logger.info("Starting spatial discretization")
     V = fu.get_mixed_function_space(mesh, 3)
     # define fun space for grad_af
     vec_V = fenics.VectorFunctionSpace(mesh, "CG", 1)
@@ -1031,21 +1025,21 @@ def test_tip_cell_activation(spatial_dimension: int,
         # --- Initial conditions
         # phi
         if spatial_dimension == 3:
-            mpi_print("Computing phi0...")
+            logger.info("Computing phi0...")
         phi_expression = get_growing_RH_expression(sim_parameters, mesh_parameters, 0, spatial_dimension)
         phi = fenics.interpolate(phi_expression, V.sub(0).collapse())
         phi.rename("phi", "retinal hemangioblastoma")
 
         # af
         if spatial_dimension == 3:
-            mpi_print("Computing af0...")
+            logger.info("Computing af0...")
         af_old = fenics.Function(V.sub(0).collapse())
         compute_af_0(af_old, V.sub(0).collapse(), phi, c_old, sim_parameters, lsp)
         af_old.rename("af", "angiogenic factor")
 
         # af gradient
         if spatial_dimension == 3:
-            mpi_print("Computing grad_af0...")
+            logger.info("Computing grad_af0...")
         grad_af_old = fenics.Function(vec_V)
         ge.compute_gradient(af_old, vec_V, grad_af_old, lsp)
         grad_af_old.rename("grad_af", "angiogenic factor gradient")

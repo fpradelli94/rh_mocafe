@@ -2,6 +2,7 @@ import fenics
 import subprocess
 import pandas as pd
 import sys
+import logging
 from src.common import run_simulation, resume_simulation, test_tip_cell_activation
 from mocafe.fenut.parameters import Parameters
 
@@ -11,6 +12,15 @@ rank = comm_world.Get_rank()
 
 # set fenics log level
 fenics.set_log_level(fenics.LogLevel.ERROR)
+
+# set up logger
+logger = logging.getLogger()
+logger.setLevel(logging.WARNING)
+ch = logging.StreamHandler(stream=sys.stdout)
+ch.setLevel(logging.DEBUG)
+formatter = logging.Formatter(f"p{rank}:%(name)s:%(levelname)s: %(message)s")
+ch.setFormatter(formatter)
+logger.addHandler(ch)
 
 
 def tutorial_2d():
