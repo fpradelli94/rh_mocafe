@@ -103,7 +103,7 @@ This repository contains several folders:
 
 ```bash
 .
-├── input_images
+├── input_patients_data
 ├── notebooks
 ├── saved_sim
 ├── saved_sim_archive # only on Zenodo

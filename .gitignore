@@ -5,3 +5,4 @@ __pycache__
 /visualization/paraview/out/*
 /notebooks/out/*
 /.idea/
+/input_patients_data/old/
