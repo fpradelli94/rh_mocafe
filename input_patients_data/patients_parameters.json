@@ -1,0 +1,84 @@
+{
+  "_description": "Patient specific parameters for each patient.",
+  "patient0": {
+    "patient_code": 0,
+    "pic2d": "input_patients_data/3_pic_binaries/patient0_pic2d.png",
+    "half_depth": 0.1,
+    "tumor_lateral_ax": {
+      "value": 490,
+      "mu": "um"
+    },
+    "tumor_axial_ax": {
+      "value": 752,
+      "mu": "um"
+    },
+    "simulation_box": {
+      "Lx": {
+        "value": 1333,
+        "mu": "um"
+      },
+      "Ly": {
+        "value": 1333,
+        "mu": "um"
+      },
+      "Lz": {
+        "value": 1031,
+        "mu": "um"
+      }
+    }
+  },
+  "patient1": {
+    "patient_code": 1,
+    "pic2d": "input_patients_data/3_pic_binaries/patient1_pic2d.png",
+    "half_depth": 0.1,
+    "tumor_lateral_ax": {
+      "value": 208,
+      "mu": "um"
+    },
+    "tumor_axial_ax": {
+      "value": 65,
+      "mu": "um"
+    },
+    "simulation_box": {
+      "Lx": {
+        "value": 563,
+        "mu": "um"
+      },
+      "Ly": {
+        "value": 563,
+        "mu": "um"
+      },
+      "Lz": {
+        "value": 155,
+        "mu": "um"
+      }
+    }
+  },
+  "patient2": {
+    "patient_code": 2,
+    "pic2d": "input_patients_data/3_pic_binaries/patient2_pic2d.png",
+    "half_depth": 0.1,
+    "tumor_lateral_ax": {
+      "value": 560,
+      "mu": "um"
+    },
+    "tumor_axial_ax": {
+      "value": 572,
+      "mu": "um"
+    },
+    "simulation_box": {
+      "Lx": {
+        "value": 1428,
+        "mu": "um"
+      },
+      "Ly": {
+        "value": 1428,
+        "mu": "um"
+      },
+      "Lz": {
+        "value": 707,
+        "mu": "um"
+      }
+    }
+  }
+}
