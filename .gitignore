@@ -6,3 +6,4 @@ __pycache__
 /notebooks/out/*
 /.idea/
 /input_patients_data/old/
+/misc/
