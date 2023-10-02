@@ -255,47 +255,48 @@ def resume_simulation(resume_from: str,
     stored in ``slurm/<slurm job ID>.pbar``.
     :param activate_logger: activate the standard logger to save detailed information on the simulation activity.
     """
-    # -- Initial setup
-    # check if is possible to resume
-    error_msg = "Not enough info to resume."
+    # ---------------------------------------------------------------------------------------------------------------- #
+    #                                         Check if it's possible to resume
+    # ---------------------------------------------------------------------------------------------------------------- #
+    logger.info("Checking if it's possible to resume simulation ... ")
 
-    sim_parameters_csv = Path(resume_from + "/sim_info/sim_parameters.csv")
-    if not sim_parameters_csv.exists():
-        raise RuntimeError(error_msg + " sim_parameters.csv missing.")
-    sim_parameters = Parameters(pd.read_csv(str(sim_parameters_csv)))
+    # init error msg
+    error_msg_preamble = "Not enough info to resume."
 
-    mesh_parameters_csv = Path(resume_from + "/sim_info/mesh_parameters.csv")
-    if not mesh_parameters_csv.exists():
-        raise RuntimeError(error_msg + " mesh_parameters.csv missing.")
-    mesh_parameters = Parameters(pd.read_csv(mesh_parameters_csv))
-
-    input_incremental_tip_cells = Path(resume_from + "/sim_info/incremental_tipcells.json")
-    if not input_incremental_tip_cells.exists():
-        raise RuntimeError(error_msg + " incremental_tipcells.json missing.")
-    with open(str(input_incremental_tip_cells), "r") as infile:
-        input_itc = json.load(infile)
-
+    # check if all relevant files exist
+    input_report_folder = Path(resume_from + "/sim_info/")
+    sim_parameters_csv = input_report_folder / Path("sim_parameters.csv")
+    mesh_parameters_csv = input_report_folder / Path("mesh_parameters.csv")
+    input_incremental_tip_cells = input_report_folder / Path("incremental_tipcells.json")
+    patient_parameters_file = input_report_folder / Path("patient_parameters.json")
     input_resume_folder = Path(resume_from + "/resume")
     resume_files = ["mesh.xdmf", "af.xdmf", "c.xdmf", "grad_af.xdmf", "mu.xdmf", "phi.xdmf", "tipcells.json"]
     resume_files_dict = {file_name: input_resume_folder / Path(file_name)
                          for file_name in resume_files}
-    if not input_resume_folder.exists():
-        raise RuntimeError(error_msg + " resume folder missing.")
-    else:
-        for key, item in resume_files_dict.items():
-            if not item.exists():
-                raise RuntimeError(error_msg + f" {key} missing")
+    for f in [sim_parameters_csv, mesh_parameters_csv, input_resume_folder, input_incremental_tip_cells,
+              patient_parameters_file, *resume_files_dict.values()]:
+        if not f.exists():
+            raise RuntimeError(f"{error_msg_preamble} {f} is missing.")
 
+    # ---------------------------------------------------------------------------------------------------------------- #
+    #                                                   Initialize
+    # ---------------------------------------------------------------------------------------------------------------- #
     # count time
     init_time = time.time()
 
-    # set up folders
+    # set up 'data' folder
     data_folder = mansim.setup_data_folder(folder_path=f"saved_sim/{out_folder_name}",
                                            auto_enumerate=out_folder_mode)
+
+    # set up 'report' folder
     report_folder = data_folder / Path("sim_info")
     if rank == 0:
         report_folder.mkdir(exist_ok=True, parents=True)
+
+    # set up 'reproduce' folder
     reproduce_folder = data_folder / Path("0_reproduce")
+
+    # set up slurm folder
     if (slurm_job_id is not None) and (rank == 0):
         Path("slurm").mkdir(exist_ok=True)
 
@@ -304,13 +305,7 @@ def resume_simulation(resume_from: str,
         if reproduce_folder.exists():
             shutil.rmtree(str(reproduce_folder.resolve()))
         shutil.copytree(str(Path(__file__).parent.parent.resolve()), str(reproduce_folder.resolve()),
-                        ignore=shutil.ignore_patterns("README.md",
-                                                      "saved_sim*",
-                                                      "*.ipynb_checkpoints*",
-                                                      "sif",
-                                                      "visualization",
-                                                      "*pycache*",
-                                                      ".thumbs"))
+                        ignore=shutil.ignore_patterns(*ignored_patterns))
     comm_world.Barrier()
 
     # setup logger
@@ -324,36 +319,70 @@ def resume_simulation(resume_from: str,
         {"flush_output": True, "rewrite_function_mesh": False}
     )
 
-    # --- Mesh definition
+    # load parameters
+    sim_parameters = Parameters(pd.read_csv(str(sim_parameters_csv)))
+    mesh_parameters = Parameters(pd.read_csv(mesh_parameters_csv))
+    with open(str(input_incremental_tip_cells), "r") as infile:
+        input_itc = json.load(infile)
+    with open(str(patient_parameters_file), "r") as infile:
+        patient_parameters = json.load(infile)
+
+    # create unit registry with arbitrary units
+    local_ureg: UnitRegistry = UnitRegistry()
+    local_ureg = load_arbitrary_units(local_ureg,
+                                      sim_parameters.as_dataframe(),
+                                      sau_name="Space Arbitrary Unit",
+                                      tau_name="Time Arbitrary Unit",
+                                      afau_name="AFs Arbitrary Unit")
+
+    # ---------------------------------------------------------------------------------------------------------------- #
+    #                                                 Load Mesh
+    # ---------------------------------------------------------------------------------------------------------------- #
+    logger.info("Loading Mesh... ")
     mesh = fenics.Mesh()
     with fenics.XDMFFile(str(resume_files_dict["mesh.xdmf"])) as infile:
         infile.read(mesh)
 
-    # --- Spatial discretization
+    # ---------------------------------------------------------------------------------------------------------------- #
+    #                                              Spatial Discretization
+    # ---------------------------------------------------------------------------------------------------------------- #
     V = fu.get_mixed_function_space(mesh, 3)
     vec_V = fenics.VectorFunctionSpace(mesh, "CG", 1)  # for grad_af
 
-    # --- Define linear solver parameters
+    # ---------------------------------------------------------------------------------------------------------------- #
+    #                                                Initial Conditions
+    # ---------------------------------------------------------------------------------------------------------------- #
+    # define linear solver parameters (used to define some initial conditions)
     lsp = {"ksp_type": "gmres", "pc_type": "gamg"}
 
-    # --- Initial conditions
+    # get last stem of the resumed folder
     last_step = max([int(step.replace("step_", "")) for step in input_itc])
 
     # capillaries
+    logger.info("Loading c0... ")
     c_old = fenics.Function(V.sub(0).collapse())
     resume_c_xdmf = fenics.XDMFFile(str(resume_files_dict["c.xdmf"]))
-    resume_c_xdmf.read_checkpoint(c_old, "c", 0)
+    with resume_c_xdmf as infile:
+        infile.read_checkpoint(c_old, "c", 0)
     c_old.rename("c", "capillaries")
     c_xdmf.write(c_old, last_step)
 
     # mu
+    logger.info("Loading mu... ")
     mu_old = fenics.Function(V.sub(0).collapse())
     resume_mu_xdmf = fenics.XDMFFile(str(resume_files_dict["mu.xdmf"]))
-    resume_mu_xdmf.read_checkpoint(mu_old, "mu", 0)
+    with resume_mu_xdmf as infile:
+        infile.read_checkpoint(mu_old, "mu", 0)
 
     # phi
+    logger.info("Generating phi... ")
     spatial_dimension = len(mesh.coordinates()[0])
-    phi_expression = get_growing_RH_expression(sim_parameters, mesh_parameters, last_step, spatial_dimension)
+    phi_expression = get_growing_RH_expression(sim_parameters,
+                                               patient_parameters,
+                                               mesh_parameters,
+                                               local_ureg,
+                                               last_step,
+                                               spatial_dimension)
     phi = fenics.interpolate(phi_expression, V.sub(0).collapse())
     phi.rename("phi", "retinal hemangioblastoma")
     phi_xdmf.write(phi, last_step)
@@ -364,21 +393,29 @@ def resume_simulation(resume_from: str,
     tipcells_xdmf.write(t_c_f_function, 0)
 
     # af
+    logger.info("Loading af... ")
     af_old = fenics.Function(V.sub(0).collapse())
     resume_af_xdmf = fenics.XDMFFile(str(resume_files_dict["af.xdmf"]))
-    resume_af_xdmf.read_checkpoint(af_old, "af", 0)
+    with resume_af_xdmf as infile:
+        infile.read_checkpoint(af_old, "af", 0)
     af_old.rename("af", "angiogenic factor")
     af_xdmf.write(af_old, 0)
 
     # af gradient
+    logger.info("Loading af_grad... ")
     ge = GradientEvaluator()
     grad_af_old = fenics.Function(vec_V)
     resume_grad_af_xdmf = fenics.XDMFFile(str(resume_files_dict["grad_af.xdmf"]))
-    resume_grad_af_xdmf.read_checkpoint(grad_af_old, "grad_af", 0)
+    with resume_grad_af_xdmf as infile:
+        infile.read_checkpoint(grad_af_old, "grad_af", 0)
     grad_af_old.rename("grad_af", "angiogenic factor gradient")
     grad_af_xdmf.write(grad_af_old, 0)
 
-    # --- Weak form definition
+    exit(0)
+
+    # ---------------------------------------------------------------------------------------------------------------- #
+    #                                              Weak form definition
+    # ---------------------------------------------------------------------------------------------------------------- #
     # define variable functions
     if spatial_dimension == 3:
         logger.info("Defining weak form...")
@@ -393,11 +430,14 @@ def resume_simulation(resume_from: str,
                                                                              sim_parameters)
     form = af_form + capillaries_form
 
-    # --- Problem solution
-    if spatial_dimension == 3:
-        logger.info("Defining problem...")
+    # ---------------------------------------------------------------------------------------------------------------- #
+    #                                                  Simulation
+    # ---------------------------------------------------------------------------------------------------------------- #
+    logger.info("Defining problem...")
+
     # define Jacobian
     J = fenics.derivative(form, u)
+
     # define problem
     problem = PETScProblem(J, form, [])
     solver = PETScNewtonSolver(lsp, mesh.mpi_comm())
@@ -410,20 +450,23 @@ def resume_simulation(resume_from: str,
     t = last_step
     dt = sim_parameters.get_value("dt")
 
-    if rank == 0:
-        if slurm_job_id is not None:
-            pbar_file = open(f"slurm/{slurm_job_id}pbar.o", 'w')
-            pbar = tqdm(total=steps, ncols=100, desc=out_folder_name, file=pbar_file)
-        else:
-            pbar_file = None
-            pbar = tqdm(total=steps, ncols=100, desc=out_folder_name)
+    # set up error flag
+    runtime_error_occurred = False
+    error_msg = None
+
+    # set up pbar
+    if (slurm_job_id is not None) and (rank == 0):
+        pbar_file = open(f"slurm/{slurm_job_id}pbar.o", 'w')
     else:
-        pbar_file = None
-        pbar = None
+        pbar_file = sys.stdout
+    pbar = tqdm(total=steps,
+                ncols=100,
+                desc=out_folder_name,
+                file=pbar_file,
+                disable=True if rank != 0 else False)
 
     # log
-    if spatial_dimension == 3:
-        logger.info("Starting time iteration...")
+    logger.info("Starting time iteration...")
 
     # iterate in time
     for step in range(last_step + 1, last_step + steps + 1):
@@ -447,27 +490,12 @@ def resume_simulation(resume_from: str,
         try:
             solver.solve(problem, u.vector())
         except RuntimeError as e:
-            # save sim data
-            mansim.save_sim_info(data_folder=report_folder,
-                                 parameters={"Sim Parameters:": sim_parameters, "Mesh parameters": mesh_parameters},
-                                 execution_time=time.time() - init_time,
-                                 sim_name=out_folder_name,
-                                 sim_description="RUNTIME ERROR OCCURRED. \n" + sim_rationale, error_msg=str(e))
-            # save parameters
-            sim_parameters.as_dataframe().to_csv(report_folder / Path("sim_parameters.csv"))
-            mesh_parameters.as_dataframe().to_csv(report_folder / Path("mesh_parameters.csv"))
-            # write files
-            af_xdmf.write(af_old, t)
-            c_xdmf.write(c_old, t)
-            grad_af_xdmf.write(grad_af_old, t)
-            phi_xdmf.write(phi, t)
-            # save tip cells current position
-            tipcells_xdmf.write(t_c_f_function, t)
-            save_resume_info(data_folder / Path("resume"),
-                             fnc_dict={"af": af_old, "c": c_old, "mu": mu_old, "phi": phi, "grad_af": grad_af_old},
-                             tip_cell_manager=tip_cell_manager)
-            # close iteration in time
-            return 1
+            # store error info
+            runtime_error_occurred = True
+            error_msg = str(e)
+            logger.error(error_msg)
+            # stop simulation
+            break
 
         # assign to old
         fenics.assign([af_old, c_old, mu_old], u)
@@ -478,7 +506,7 @@ def resume_simulation(resume_from: str,
         phi.assign(fenics.interpolate(phi_expression, V.sub(0).collapse()))
 
         # save
-        if (step % save_rate == 0) or (step == (last_step + steps)):
+        if (step % save_rate == 0) or (step == (last_step + steps)) or runtime_error_occurred:
             # write files
             af_xdmf.write(af_old, t)
             c_xdmf.write(c_old, t)
@@ -491,32 +519,40 @@ def resume_simulation(resume_from: str,
         if rank == 0:
             pbar.update(1)
 
+    # close pbar file
     if (rank == 0) and (slurm_job_id is not None):
         pbar_file.close()
 
     # save resume info
     save_resume_info(data_folder / Path("resume"),
-                     fnc_dict={"af": af_old, "c": c_old, "mu": mu_old, "phi": phi,
-                               "grad_af": grad_af_old},
+                     fnc_dict={"af": af_old, "c": c_old, "mu": mu_old, "phi": phi, "grad_af": grad_af_old},
                      tip_cell_manager=tip_cell_manager)
-
     # save sim data
+    if runtime_error_occurred:
+        sim_description = "RUNTIME ERROR OCCURRED. \n" + sim_rationale
+    else:
+        sim_description = sim_rationale
     mansim.save_sim_info(data_folder=report_folder,
-                         parameters={"Sim parameters:": sim_parameters, "Mesh parameters": mesh_parameters},
+                         parameters={"Sim parameters:": sim_parameters,
+                                     "Mesh parameters": mesh_parameters},
                          execution_time=time.time() - init_time,
                          sim_name=out_folder_name,
-                         sim_description=sim_rationale)
+                         sim_description=sim_description,
+                         error_msg=error_msg)
     # save parameters
     sim_parameters.as_dataframe().to_csv(report_folder / Path("sim_parameters.csv"))
     mesh_parameters.as_dataframe().to_csv(report_folder / Path("mesh_parameters.csv"))
+    with open(report_folder / Path("patient_parameters.json"), "w") as outfile:
+        json.dump(patient_parameters, outfile)
 
     comm_world.Barrier()  # wait for all processes
 
-    return 0
+    return runtime_error_occurred
 
 
 def run_simulation(spatial_dimension: int,
                    sim_parameters: Parameters,
+                   patient_parameters: Dict,
                    steps: int,
                    save_rate: int = 1,
                    out_folder_name: str = mansim.default_data_folder_name,
@@ -531,6 +567,7 @@ def run_simulation(spatial_dimension: int,
 
     :param spatial_dimension: specify if the simulation will be in 2D or 3D.
     :param sim_parameters: parameters to be used in the simulation.
+    :param patient_parameters:
     :param steps: number of simulation steps.
     :param save_rate: specify how often the simulation status will be stored (e.g. if ``save_rate=10``, it will be
     stored every 10 steps). The last simulation step is always saved.
@@ -560,15 +597,22 @@ def run_simulation(spatial_dimension: int,
     if not (spatial_dimension == 2 or spatial_dimension == 3):
         raise RuntimeError(f"Cannot run simulation for dimension {spatial_dimension}")
 
-    init_time: float = time.time()  # set init time
+    # count time
+    init_time: float = time.time()
 
-    local_ureg: UnitRegistry = UnitRegistry()  # set unit registry
+    # create unit registry with arbitrary units
+    local_ureg: UnitRegistry = UnitRegistry()
+    local_ureg = load_arbitrary_units(local_ureg,
+                                      sim_parameters.as_dataframe(),
+                                      sau_name="Space Arbitrary Unit",
+                                      tau_name="Time Arbitrary Unit",
+                                      afau_name="AFs Arbitrary Unit")
 
     # set up 'data folder' (where the result of the simulation is stored)
     data_folder: Path = mansim.setup_data_folder(folder_path=f"saved_sim/{out_folder_name}",
-                                                         auto_enumerate=out_folder_mode)
+                                                 auto_enumerate=out_folder_mode)
 
-    # set up 'report' folder (where the report of the simulation is stored
+    # set up 'report' folder (where the report of the simulation is stored)
     report_folder: Path = data_folder / Path("sim_info")
     if rank == 0:
         report_folder.mkdir(exist_ok=True, parents=True)
@@ -612,17 +656,6 @@ def run_simulation(spatial_dimension: int,
         {"flush_output": True, "rewrite_function_mesh": False}
     )
 
-    # load arbitrary units
-    local_ureg = load_arbitrary_units(local_ureg,
-                                      sim_parameters.as_dataframe(),
-                                      sau_name="Space Arbitrary Unit",
-                                      tau_name="Time Arbitrary Unit",
-                                      afau_name="AFs Arbitrary Unit")
-    
-    # load patient-specific parameters
-    with open("input_images/patient0_parameters.json", "r") as infile:
-        patient_parameters: Dict = json.load(infile)
-
     # ---------------------------------------------------------------------------------------------------------------- #
     #                                                 Mesh Definition                                                   
     # ---------------------------------------------------------------------------------------------------------------- #
@@ -643,8 +676,9 @@ def run_simulation(spatial_dimension: int,
                                                         mesh_parameters_file,
                                                         recompute_mesh)
 
-    # save mesh also in resume folder
-    save_resume_info(resume_folder, mesh=mesh)
+    # copy mesh in resume folder
+    for mf in mesh_folder.glob("mesh.*"):
+        shutil.copy(mf, resume_folder)
 
     # ---------------------------------------------------------------------------------------------------------------- #
     #                                              Spatial Discretization
@@ -660,8 +694,7 @@ def run_simulation(spatial_dimension: int,
 
     # capillaries
     if spatial_dimension == 2:
-        cb = "notebooks/out/RH_vessels_binary_ND.png"
-        c_old_expression = BWImageExpression(cb, [-1, 1], local_ureg)
+        c_old_expression = BWImageExpression(patient_parameters["pic2d"], [-1, 1], local_ureg)
         c_old = fenics.interpolate(c_old_expression, V.sub(0).collapse())
     else:
         # define c0 function
@@ -669,7 +702,7 @@ def run_simulation(spatial_dimension: int,
         # define c0 file
         c0_xdmf: Path = c0_folder / Path("c0.xdmf")
         # get 3d c0
-        get_3d_c0(c_old, mesh_parameters, c0_xdmf, recompute_c0)
+        get_3d_c0(c_old, patient_parameters, mesh_parameters, c0_xdmf, recompute_c0)
 
     # name c_old
     c_old.rename("c", "capillaries")
@@ -681,7 +714,13 @@ def run_simulation(spatial_dimension: int,
 
     # define initial condition for tumor
     logger.info("Computing phi0...")
-    phi_expression = get_growing_RH_expression(sim_parameters, mesh_parameters, 0, spatial_dimension)
+    # initial semiaxes of the tumor
+    phi_expression = get_growing_RH_expression(sim_parameters,
+                                               patient_parameters,
+                                               mesh_parameters,
+                                               local_ureg,
+                                               0,
+                                               spatial_dimension)
     phi = fenics.interpolate(phi_expression, V.sub(0).collapse())
     phi.rename("phi", "retinal hemangioblastoma")
     phi_xdmf.write(phi, 0)
@@ -708,7 +747,7 @@ def run_simulation(spatial_dimension: int,
     grad_af_xdmf.write(grad_af_old, 0)
 
     # ---------------------------------------------------------------------------------------------------------------- #
-    # Weak form definition
+    #                                              Weak form definition
     # ---------------------------------------------------------------------------------------------------------------- #
     logger.info("Defining weak form...")
 
@@ -725,7 +764,7 @@ def run_simulation(spatial_dimension: int,
     form = af_form + capillaries_form
 
     # ---------------------------------------------------------------------------------------------------------------- #
-    # Simulation
+    #                                                  Simulation
     # ---------------------------------------------------------------------------------------------------------------- #
     logger.info("Defining problem...")
 
@@ -832,6 +871,8 @@ def run_simulation(spatial_dimension: int,
     # save parameters
     sim_parameters.as_dataframe().to_csv(report_folder / Path("sim_parameters.csv"))
     mesh_parameters.as_dataframe().to_csv(report_folder / Path("mesh_parameters.csv"))
+    with open(report_folder / Path("patient_parameters.json"), "w") as outfile:
+        json.dump(patient_parameters, outfile)
 
     comm_world.Barrier()  # wait for all processes
 
@@ -840,6 +881,7 @@ def run_simulation(spatial_dimension: int,
 
 def test_tip_cell_activation(spatial_dimension: int,
                              df_standard_params: pd.DataFrame,
+                             patient_parameters: Dict,
                              out_folder_name: str = mansim.default_data_folder_name,
                              out_folder_mode: str = None,
                              slurm_job_id: int = None,
@@ -897,10 +939,6 @@ def test_tip_cell_activation(spatial_dimension: int,
                                       sau_name="Space Arbitrary Unit",
                                       tau_name="Time Arbitrary Unit",
                                       afau_name="AFs Arbitrary Unit")
-
-    # load patient-specific parameters
-    with open("input_images/patient0_parameters.json", "r") as infile:
-        patient_parameters: Dict = json.load(infile)
 
     # --- Define parameters sets to test
     if kwargs:
@@ -982,7 +1020,7 @@ def test_tip_cell_activation(spatial_dimension: int,
         # define c0 file
         c0_xdmf: Path = c0_folder / Path("c0.xdmf")
         # get 3d c0
-        get_3d_c0(c_old, mesh_parameters, c0_xdmf, recompute_c0)
+        get_3d_c0(c_old, patient_parameters, mesh_parameters, c0_xdmf, recompute_c0)
 
     # -- Define gradient evaluator to compute grad_af
     ge = GradientEvaluator()
@@ -1013,7 +1051,12 @@ def test_tip_cell_activation(spatial_dimension: int,
         # phi
         if spatial_dimension == 3:
             logger.info("Computing phi0...")
-        phi_expression = get_growing_RH_expression(sim_parameters, mesh_parameters, 0, spatial_dimension)
+        phi_expression = get_growing_RH_expression(sim_parameters,
+                                                   patient_parameters,
+                                                   mesh_parameters,
+                                                   local_ureg,
+                                                   0,
+                                                   spatial_dimension)
         phi = fenics.interpolate(phi_expression, V.sub(0).collapse())
         phi.rename("phi", "retinal hemangioblastoma")
 

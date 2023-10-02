@@ -4,13 +4,16 @@ File containing the FEniCS Expressions used throughout the simulation
 import fenics
 import numpy as np
 import pint
+from typing import Dict
 from PIL import Image
 from mocafe.math import sigmoid
 from mocafe.fenut.parameters import Parameters
 
 
 def get_growing_RH_expression(sim_parameters: Parameters,
+                              patient_parameters: Dict,
                               mesh_parameters: Parameters,
+                              local_ureg: pint.UnitRegistry,
                               initial_t: float,
                               spatial_dimension: int) -> fenics.Expression:
     """
@@ -22,11 +25,27 @@ def get_growing_RH_expression(sim_parameters: Parameters,
     :param initial_t: time at which the tumor is at the ``min_tumor_diameter`` (initial condition)
     :param spatial_dimension: 2 if 2D, 3 if 3D.
     """
-    # write cpp code for time variant tumor diameter
-    cpp_td = "(td_i * pow(tgr, t / 3))"
-    # derive cpp code for semiaxes
-    cpp_semiax_x = cpp_semiax_y = f"({cpp_td} / 2)"
-    cpp_semiax_z = cpp_td
+    # get patient axes for the full grown tumor
+    lateral_ax: pint.Quantity = float(patient_parameters["tumor_lateral_ax"]["value"]) \
+                                * local_ureg(patient_parameters["tumor_lateral_ax"]["mu"])
+    axial_ax: pint.Quantity = float(patient_parameters["tumor_axial_ax"]["value"]) \
+                              * local_ureg(patient_parameters["tumor_axial_ax"]["mu"])
+
+    # convert to sau
+    lateral_ax = lateral_ax.to("sau")
+    axial_ax = axial_ax.to("sau")
+
+    # compute initial semiaxes
+    tdf_i = sim_parameters.get_value("tdf_i")
+    semiax_x0 = tdf_i * (lateral_ax.magnitude / 2)
+    semiax_y0 = tdf_i * (lateral_ax.magnitude / 2)
+    semiax_z0 = tdf_i * (axial_ax.magnitude / 2)
+
+    # write cpp code for time variant semiaxes
+    cpp_semiax_x = "(sa_xi * pow(tgr, t / 3))"
+    cpp_semiax_y = "(sa_yi * pow(tgr, t / 3))"
+    cpp_semiax_z = "(sa_zi * pow(tgr, t / 3))"
+
     # derive cpp code for center
     cpp_cx = "(Lx / 2)"
     cpp_cy = "(Ly / 2)"
@@ -36,7 +55,8 @@ def get_growing_RH_expression(sim_parameters: Parameters,
                       f"  pow(((x[1] - {cpp_cy}) / {cpp_semiax_y}), 2)) <= 1.) ? 1. : 0."
         rh_exp = fenics.Expression(cpp_ellipse,
                                    degree=1,
-                                   td_i=sim_parameters.get_value("min_tumor_diameter"),
+                                   sa_xi=semiax_x0,
+                                   sa_yi=semiax_y0,
                                    tgr=sim_parameters.get_value("tgr"),
                                    t=initial_t,
                                    Lx=mesh_parameters.get_value("Lx"),
@@ -48,7 +68,9 @@ def get_growing_RH_expression(sim_parameters: Parameters,
                         f"  pow(((x[2] - {cpp_cz}) / {cpp_semiax_z}), 2)) <= 1.) ? 1. : 0."
         rh_exp = fenics.Expression(cpp_ellipsoid,
                                    degree=1,
-                                   td_i=sim_parameters.get_value("min_tumor_diameter"),
+                                   sa_xi=semiax_x0,
+                                   sa_yi=semiax_y0,
+                                   sa_zi=semiax_z0,
                                    tgr=sim_parameters.get_value("tgr"),
                                    t=initial_t,
                                    Lx=mesh_parameters.get_value("Lx"),

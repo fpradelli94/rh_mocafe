@@ -1,10 +1,12 @@
-import fenics
-import subprocess
-import pandas as pd
 import sys
+import json
 import logging
-from src.common import run_simulation, resume_simulation, test_tip_cell_activation
+import subprocess
+import fenics
+import pandas as pd
 from mocafe.fenut.parameters import Parameters
+from src.common import run_simulation, resume_simulation, test_tip_cell_activation
+
 
 # get process rank
 comm_world = fenics.MPI.comm_world
@@ -50,12 +52,18 @@ def tutorial_2d():
     else:
         slurm_job_id = None
 
+    # load patients parameters for p0
+    with open("input_patients_data/patients_parameters.json", "r") as infile:
+        patients_parameters = json.load(infile)
+    patient0_parameters = patients_parameters["patient0"]
+
     """--- Use examples ---"""
     spatial_dimension = 2  # warning: 3D simulation require a considerable computational effort, see README.md
 
     # Ex. 1: run a simulation
     run_simulation(spatial_dimension=spatial_dimension,                # 2 for 2D or 3 for 3D
                    sim_parameters=Parameters(standard_parameters_df),  # simulation parameters
+                   patient_parameters=patient0_parameters,
                    steps=100,                                          # n steps
                    save_rate=100,                                      # save every 100 steps
                    out_folder_name="sim1",                             # store result in saved_sim/sim1
@@ -69,6 +77,7 @@ def tutorial_2d():
                              sim_parameters.get_value("max_tumor_diameter"))
     run_simulation(spatial_dimension=spatial_dimension,
                    sim_parameters=sim_parameters,
+                   patient_parameters=patient0_parameters,
                    steps=100,
                    save_rate=100,
                    out_folder_name="sim2",
@@ -87,6 +96,7 @@ def tutorial_2d():
     # Ex 4.: Test if TC activation occurs
     test_tip_cell_activation(spatial_dimension,
                              df_standard_params=standard_parameters_df,
+                             patient_parameters=patient0_parameters,
                              out_folder_name="test_tc_activation")
 
 
@@ -131,12 +141,18 @@ def reproduce_results():
     # load parameters
     sim_parameters = Parameters(standard_parameters_df)
 
+    # load patients parameters for p0
+    with open("input_patients_data/patients_parameters.json", "r") as infile:
+        patients_parameters = json.load(infile)
+    patient0_parameters = patients_parameters["patient0"]
+
     # change initial tumor diameter
     sim_parameters.set_value("min_tumor_diameter", 0.5)  # correspond to d_0 (unit of measure is [sau])
 
     # run simulation
     run_simulation(spatial_dimension=3,
                    sim_parameters=sim_parameters,
+                   patient_parameters=patient0_parameters,
                    steps=2,
                    save_rate=10,
                    out_folder_name="Fig2",
@@ -155,6 +171,7 @@ def reproduce_results():
     # test tip cell activation
     test_tip_cell_activation(spatial_dimension=3,
                              df_standard_params=standard_parameters_df,
+                             patient_parameters=patient0_parameters,
                              out_folder_name="Fig3")
 
     # ---------------------------------------------------------------------------------------------------------------- #
@@ -186,6 +203,7 @@ def reproduce_results():
 
         run_simulation(spatial_dimension=3,
                        sim_parameters=sim_parameters,
+                       patient_parameters=patient0_parameters,
                        steps=steps,
                        save_rate=20,
                        out_folder_name=sim_folder,
@@ -217,6 +235,7 @@ def reproduce_results():
 
     run_simulation(spatial_dimension=3,
                    sim_parameters=sim_parameters,
+                   patient_parameters=patient0_parameters,
                    steps=steps,
                    save_rate=10,
                    out_folder_name="Fig4d",
@@ -224,8 +243,87 @@ def reproduce_results():
                    slurm_job_id=slurm_job_id)
 
 
+def test():
+    # ---------------------------------------------------------------------------------------------------------------- #
+    # PREAMBLE
+    # Below, we generate the simulation parameters form the notebook, and we get the slurm job ID, if any.
+    # ---------------------------------------------------------------------------------------------------------------- #
+
+    # execute the notebook
+    parameters_nb = "notebooks/parameters.ipynb"
+    if rank == 0:
+        subprocess.run(["jupyter", "nbconvert", "--to", "html", "--execute", parameters_nb])
+
+    # load parameters as generated from the notebook
+    parameters_csv = "notebooks/out/g_parameters.csv"
+    standard_parameters_df = pd.read_csv(parameters_csv, index_col="name")
+
+    # get slurm job id, if any
+    if "-slurm_job_id" in sys.argv:
+        try:
+            slurm_job_id = int(sys.argv[sys.argv.index("-slurm_job_id") + 1])
+        except IndexError:
+            raise IndexError("slurm_job_id not specified. Found -slurm_job_id not followed by an actual id.")
+    else:
+        slurm_job_id = None
+
+    # wait for all processes
+    comm_world.Barrier()
+
+    # ---------------------------------------------------------------------------------------------------------------- #
+    # RUN SIMULATION
+    # ---------------------------------------------------------------------------------------------------------------- #
+
+    # load parameters
+    sim_parameters = Parameters(standard_parameters_df)
+
+    # load patients parameters for p0
+    with open("input_patients_data/patients_parameters.json", "r") as infile:
+        patients_parameters = json.load(infile)
+    patient0_parameters = patients_parameters["patient0"]
+
+    steps = 2
+
+    # run simulation
+    run_simulation(spatial_dimension=3,
+                   sim_parameters=sim_parameters,
+                   patient_parameters=patient0_parameters,
+                   steps=steps,
+                   save_rate=10,
+                   out_folder_name="Test",
+                   sim_rationale=f"Test",
+                   slurm_job_id=slurm_job_id,
+                   recompute_mesh=True,
+                   recompute_c0=True)
+
+    # # resume simulation
+    resume_simulation(resume_from="saved_sim/Test",
+                      steps=steps,
+                      save_rate=1,
+                      out_folder_name="Test_resume",
+                      sim_rationale="test",
+                      slurm_job_id=slurm_job_id)
+
+    # sim_parameters.set_value("tdf_i", 0.9)
+    #
+    # sim_parameters.set_value("V_uc_af", 21.1608695473508)  # values given in [1 / tau]
+    #
+    # sim_parameters.set_value("V_pT_af", 2.00243118326342)  # values given in [afau / tau]
+    #
+    # run_simulation(spatial_dimension=3,
+    #                sim_parameters=sim_parameters,
+    #                patient_parameters=patient0_parameters,
+    #                steps=steps,
+    #                save_rate=10,
+    #                out_folder_name="Test2",
+    #                sim_rationale=f"test2",
+    #                slurm_job_id=slurm_job_id,
+    #                recompute_mesh=False,
+    #                recompute_c0=False)
+
+
 def main():
-    reproduce_results()
+    test()
 
 
 if __name__ == "__main__":

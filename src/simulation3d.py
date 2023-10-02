@@ -47,11 +47,12 @@ def get_3d_mesh_for_patient(
     :return: the computed mesh and a Dict containing the mesh data
     """
 
-    # if mesh_file and mesh_parameters_file exist, and it is not necesssary to recompute the mesh,
+    # if mesh_file and mesh_parameters_file exist, and it is not necessary to recompute the mesh,
     # just load the mesh parameters. Else, compute the mesh and store it.
-    if (mesh_file.exists() and mesh_parameters_file.exists()) and (recompute_mesh is False):
+    if mesh_file.exists() and mesh_parameters_file.exists() and (recompute_mesh is False):
         # load mesh parameters
         mesh_parameters: Parameters = Parameters(pd.read_csv(mesh_parameters_file))
+        logger.info(f"Found existing mesh.")
 
     else:
         # generate mesh
@@ -70,6 +71,7 @@ def get_3d_mesh_for_patient(
         del mesh
 
     # in any case, reload the mesh (to ensure consistent distribution of the dofs)
+    logger.info(f"Loading mesh...")
     mesh = fenics.Mesh()
     with fenics.XDMFFile(str(mesh_file.resolve())) as infile:
         infile.read(mesh)
@@ -166,6 +168,7 @@ def _compute_3d_mesh_for_patient(
 
 
 def get_3d_c0(c_old: fenics.Function,
+              patient_parameters: Dict,
               mesh_parameters: Parameters,
               c0_xdmf: Path,
               recompute_c0: bool) -> None:
@@ -174,6 +177,7 @@ def get_3d_c0(c_old: fenics.Function,
     file for future reuse.
 
     :param c_old: FEniCS function to store initial condition
+    :param patient_parameters: patient-specific parameters Dict
     :param mesh_parameters: mesh parameters (used in the computation)
     :param c0_xdmf: file containing c0 (if already computed once)
     :param recompute_c0: force the function to recompute c0 even if c0_xdmf is not empty.
@@ -184,27 +188,32 @@ def get_3d_c0(c_old: fenics.Function,
 
     # if c0 file exists and it is not necessary to recompute it, load it. Else compute it.
     if c0_xdmf.exists() and (recompute_c0 is False):
+        logger.info(f"Found existing c0 in {c0_xdmf}. Loading...")
         with fenics.XDMFFile(str(c0_xdmf.resolve())) as infile:
             infile.read_checkpoint(c_old, c0_label, 0)
     else:
         # compute c0
         logger.info("Computing c0...")
-        _compute_3d_c_0(c_old, mesh_parameters)
+        _compute_3d_c_0(c_old, patient_parameters, mesh_parameters)
         # store c0
         with fenics.XDMFFile(str(c0_xdmf.resolve())) as outfile:
             outfile.write_checkpoint(c_old, c0_label, 0, fenics.XDMFFile.Encoding.HDF5, False)
 
 
 def _compute_3d_c_0(c_old: fenics.Function,
+                    patient_parameters: Dict,
                     mesh_parameters: Parameters):
     """
     Computes c initial condition in 3D
     """
     # load images
-    binary = io.imread("./notebooks/out/RH_vessels_binary_ND.png")
-    skeleton = io.imread("./notebooks/out/RH_vessels_skeleton_ND.png")
-    edges = io.imread("./notebooks/out/RH_vessels_edges_ND.png")
-    half_depth = 0.1
+    pic2d_file = patient_parameters["pic2d"]
+    pic2d_skeleton_file = pic2d_file.replace("pic2d.png", "pic2d_skeleton.png")
+    pic2d_edges_file = pic2d_file.replace("pic2d.png", "pic2d_edges.png")
+    binary = io.imread(pic2d_file)
+    skeleton = io.imread(pic2d_skeleton_file)
+    edges = io.imread(pic2d_edges_file)
+    half_depth = patient_parameters["half_depth"]
     c_old_expression = Vessel3DReconstruction(z_0=mesh_parameters.get_value("Lz") - half_depth,
                                               skeleton_array=skeleton,
                                               edge_array=edges,
