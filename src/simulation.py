@@ -98,8 +98,8 @@ class RHSimulation:
         self.out_folder_name = out_folder_name
 
         # flags
-        self.recompute_mesh = load_from_cache  # set if mesh should be recomputed
-        self.recompute_c0 = load_from_cache  # set if c0 should be recomputed# set up error flag
+        self.recompute_mesh = not load_from_cache  # set if mesh should be recomputed
+        self.recompute_c0 = not load_from_cache  # set if c0 should be recomputed# set up error flag
         self.runtime_error_occurred = False  # flag to activate in case of sim errors
         self.__resumed = False  # secret flag to check if simulation has been resumed
 
@@ -736,6 +736,10 @@ def run_simulation(spatial_dimension: int,
     :param recompute_mesh: recompute the mesh for the simulation
     :param recompute_c0: recompute c0 for the simulation. If False, the most recent c0 is used. Default is False.
     """
+    # ---------------------------------------------------------------------------------------------------------------- #
+    #                                                 Init Simulation
+    # ---------------------------------------------------------------------------------------------------------------- #
+
     # init simulation object
     simulation = RHSimulation(
         spatial_dimension=spatial_dimension,
