@@ -411,8 +411,6 @@ def resume_simulation(resume_from: str,
     grad_af_old.rename("grad_af", "angiogenic factor gradient")
     grad_af_xdmf.write(grad_af_old, 0)
 
-    exit(0)
-
     # ---------------------------------------------------------------------------------------------------------------- #
     #                                              Weak form definition
     # ---------------------------------------------------------------------------------------------------------------- #
