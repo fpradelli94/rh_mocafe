@@ -5,7 +5,7 @@ import subprocess
 import fenics
 import pandas as pd
 from mocafe.fenut.parameters import Parameters
-from src.common import run_simulation, resume_simulation, test_tip_cell_activation
+from src.simulation import run_simulation, resume_simulation, test_tip_cell_activation
 
 
 # get process rank
@@ -13,7 +13,7 @@ comm_world = fenics.MPI.comm_world
 rank = comm_world.Get_rank()
 
 # set fenics log level
-fenics.set_log_level(fenics.LogLevel.ERROR)
+# fenics.set_log_level(fenics.LogLevel.ERROR)
 
 # set up logger
 logger = logging.getLogger()
@@ -93,11 +93,11 @@ def tutorial_2d():
                                     f"{additional_steps} steps more",
                       slurm_job_id=slurm_job_id)
 
-    # Ex 4.: Test if TC activation occurs
-    test_tip_cell_activation(spatial_dimension,
-                             df_standard_params=standard_parameters_df,
-                             patient_parameters=patient0_parameters,
-                             out_folder_name="test_tc_activation")
+    # # Ex 4.: Test if TC activation occurs
+    # test_tip_cell_activation(spatial_dimension,
+    #                          df_standard_params=standard_parameters_df,
+    #                          patient_parameters=patient0_parameters,
+    #                          out_folder_name="test_tc_activation")
 
 
 def reproduce_results():
@@ -168,11 +168,11 @@ def reproduce_results():
     # script in ./rh_mocafe/visualization/python/tiles_plot.py
     # ---------------------------------------------------------------------------------------------------------------- #
 
-    # test tip cell activation
-    test_tip_cell_activation(spatial_dimension=3,
-                             df_standard_params=standard_parameters_df,
-                             patient_parameters=patient0_parameters,
-                             out_folder_name="Fig3")
+    # # test tip cell activation
+    # test_tip_cell_activation(spatial_dimension=3,
+    #                          df_standard_params=standard_parameters_df,
+    #                          patient_parameters=patient0_parameters,
+    #                          out_folder_name="Fig3")
 
     # ---------------------------------------------------------------------------------------------------------------- #
     # CODE FOR SIMULATIONS IN FIG 4a, 4b, 4c
@@ -296,7 +296,7 @@ def test():
                    recompute_mesh=True,
                    recompute_c0=True)
 
-    # # resume simulation
+    # resume simulation
     resume_simulation(resume_from="saved_sim/Test",
                       steps=steps,
                       save_rate=1,
@@ -304,22 +304,15 @@ def test():
                       sim_rationale="test",
                       slurm_job_id=slurm_job_id)
 
-    # sim_parameters.set_value("tdf_i", 0.9)
-    #
-    # sim_parameters.set_value("V_uc_af", 21.1608695473508)  # values given in [1 / tau]
-    #
-    # sim_parameters.set_value("V_pT_af", 2.00243118326342)  # values given in [afau / tau]
-    #
-    # run_simulation(spatial_dimension=3,
-    #                sim_parameters=sim_parameters,
-    #                patient_parameters=patient0_parameters,
-    #                steps=steps,
-    #                save_rate=10,
-    #                out_folder_name="Test2",
-    #                sim_rationale=f"test2",
-    #                slurm_job_id=slurm_job_id,
-    #                recompute_mesh=False,
-    #                recompute_c0=False)
+    # test tip cell activation
+    test_tip_cell_activation(spatial_dimension=3,
+                             standard_sim_parameters=sim_parameters,
+                             patient_parameters=patient0_parameters,
+                             out_folder_name="test_activation",
+                             slurm_job_id=slurm_job_id,
+                             V_uc_af=[21.1608695473508])
+
+
 
 
 def main():

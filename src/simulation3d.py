@@ -13,6 +13,7 @@ from typing import Dict, Tuple
 import skimage.io as io
 from mocafe.fenut.parameters import Parameters
 from src.expressions import Vessel3DReconstruction
+from src.ioutils import read_parameters, write_parameters
 
 # get process rank
 comm_world = fenics.MPI.comm_world
@@ -51,7 +52,7 @@ def get_3d_mesh_for_patient(
     # just load the mesh parameters. Else, compute the mesh and store it.
     if mesh_file.exists() and mesh_parameters_file.exists() and (recompute_mesh is False):
         # load mesh parameters
-        mesh_parameters: Parameters = Parameters(pd.read_csv(mesh_parameters_file))
+        mesh_parameters: Parameters = read_parameters(mesh_parameters_file)
         logger.info(f"Found existing mesh.")
 
     else:
@@ -65,7 +66,7 @@ def get_3d_mesh_for_patient(
             outfile.write(mesh)
 
         # save mesh parameters
-        mesh_parameters.as_dataframe().to_csv(mesh_parameters_file)
+        write_parameters(mesh_parameters, mesh_parameters_file)
 
         # delete mesh
         del mesh
