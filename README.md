@@ -161,7 +161,7 @@ Contains a script, `section.py`, to visualize a simulation in 3D with [ParaView]
 It is the same used to generate the thumbnail of this `README`. It only works with 3D simulations and with ParaView >5.9.0.
 
 To use the script, open ParaView and, on the View tab, select "Python Shell". 
-A new window will appear with a button "Run Script". Press the button and select the file `setion.py`.
+A new window will appear with a button "Run Script". Press the button and select the file `section.py`.
 
 If the script runs correctly, it will ask for two inputs: the absolute paths of the simulation's `c.xdmf` file 
 and of the `phi.xdmf` file. Copy and paste them in the box that will appear and let ParaView handle the rest.
