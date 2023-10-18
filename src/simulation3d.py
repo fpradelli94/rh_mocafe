@@ -21,7 +21,6 @@ rank = comm_world.Get_rank()
 
 # get logger
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
 
 def get_3d_mesh_for_patient(
@@ -30,7 +29,7 @@ def get_3d_mesh_for_patient(
         patient_parameters: Dict,
         mesh_file: Path,
         mesh_parameters_file: Path,
-        recompute_mesh) -> Tuple[fenics.BoxMesh, Parameters]:
+        recompute_mesh: bool) -> Tuple[fenics.BoxMesh, Parameters]:
     """
     Get a ``BoxMesh`` suitable for the simulation, given the patient parameters listed in the given
     dictionary.
@@ -172,7 +171,8 @@ def get_3d_c0(c_old: fenics.Function,
               patient_parameters: Dict,
               mesh_parameters: Parameters,
               c0_xdmf: Path,
-              recompute_c0: bool) -> None:
+              recompute_c0: bool,
+              write_checkpoints: bool) -> None:
     """
     Get the 3d initial condition for c0. If c0_xdmf is empty, it computes the initial condition and saves it in the
     file for future reuse.
@@ -181,6 +181,7 @@ def get_3d_c0(c_old: fenics.Function,
     :param patient_parameters: patient-specific parameters Dict
     :param mesh_parameters: mesh parameters (used in the computation)
     :param c0_xdmf: file containing c0 (if already computed once)
+    :param write_checkpoints: set to True if the latest computed c0 should be stored as XDMF file
     :param recompute_c0: force the function to recompute c0 even if c0_xdmf is not empty.
     """
 
@@ -197,8 +198,9 @@ def get_3d_c0(c_old: fenics.Function,
         logger.info("Computing c0...")
         _compute_3d_c_0(c_old, patient_parameters, mesh_parameters)
         # store c0
-        with fenics.XDMFFile(str(c0_xdmf.resolve())) as outfile:
-            outfile.write_checkpoint(c_old, c0_label, 0, fenics.XDMFFile.Encoding.HDF5, False)
+        if write_checkpoints:
+            with fenics.XDMFFile(str(c0_xdmf.resolve())) as outfile:
+                outfile.write_checkpoint(c_old, c0_label, 0, fenics.XDMFFile.Encoding.HDF5, False)
 
 
 def _compute_3d_c_0(c_old: fenics.Function,

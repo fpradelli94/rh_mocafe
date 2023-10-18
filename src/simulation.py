@@ -22,7 +22,8 @@ from mocafe.angie.tipcells import TipCellManager, load_tip_cells_from_json
 from mocafe.fenut.solvers import PETScProblem, PETScNewtonSolver
 from mocafe.fenut.log import confgure_root_logger_with_standard_settings
 import src.forms
-from src.ioutils import read_parameters, write_parameters, dump_json, load_json
+from src.ioutils import (read_parameters, write_parameters, dump_json, load_json, move_files_once_per_node,
+                         rmtree_if_exists_once_per_node)
 from src.expressions import get_growing_RH_expression, BWImageExpression
 from src.simulation2d import compute_2d_mesh_for_patient
 from src.simulation3d import get_3d_mesh_for_patient, get_3d_c0
@@ -32,18 +33,62 @@ from src.simulation3d import get_3d_mesh_for_patient, get_3d_c0
 comm_world = fenics.MPI.comm_world
 rank = comm_world.Get_rank()
 
-# Patterns ignored when copying code after simulation
-ignored_patterns = ["README.md",
-                    "saved_sim*",
-                    "*.ipynb_checkpoints*",
-                    "sif",
-                    "visualization",
-                    "*pycache*",
-                    ".thumbs"]
-
 # get logger
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
+
+class GradientEvaluator:
+    """
+    Class to efficiently compute the af gradient. Defined to avoid the use of ``fenics.project(grad(af), V)``.
+    This class keep the solver for the gradient saved, so to reuse it every time it is required.
+    """
+    def __init__(self):
+        self.solver = None
+
+    def compute_gradient(self,
+                         f: fenics.Function,
+                         V: fenics.FunctionSpace,
+                         sol: fenics.Function,
+                         options: Dict = None):
+        """
+        Efficiently compute the gradient of a function.
+
+        :param f: function to be derived.
+        :param V: f's function space.
+        :param sol: function to store the gradient.
+        :param options: options for the solver to be used.
+        """
+        # manage none dict
+        if options is None:
+            options = {}
+        # define test function
+        v = fenics.TestFunction(V)
+        # define variational form
+        if self.solver is None:
+            # define trial function
+            u = fenics.TrialFunction(V)
+            # define operator
+            A = fenics.PETScMatrix()
+            a = fenics.dot(u, v) * fenics.dx
+            fenics.assemble(a, tensor=A)
+            # define solver
+            petsc_options = PETSc.Options()
+            for option, value in options.items():
+                petsc_options.setValue(option, value)
+            ksp = PETSc.KSP().create()
+            ksp.setFromOptions()
+            ksp.setOperators(fenics.as_backend_type(A).mat())
+            # set solver
+            self.solver = ksp
+
+        # define b
+        L = fenics.inner(fenics.grad(f), v) * fenics.dx
+        b = fenics.PETScVector()
+        fenics.assemble(L, tensor=b)
+        b = fenics.as_backend_type(b).vec()
+        # solve
+        self.solver.solve(b, sol.vector().vec())
+        sol.vector().update_ghost_values()
 
 
 class RHSimulation:
@@ -56,7 +101,8 @@ class RHSimulation:
                  sim_rationale: str = "No comment",
                  slurm_job_id: int = None,
                  activate_logger: bool = False,
-                 load_from_cache: bool = False):
+                 load_from_cache: bool = False,
+                 write_checkpoints: bool = True):
         """
         Initialize a Simulation Object.
 
@@ -79,7 +125,10 @@ class RHSimulation:
         # parameters
         self.sim_parameters: Parameters = sim_parameters  # simulation parameters
         self.patient_parameters: Dict = patient_parameters  # patient parameters
-        self.lsp = {"ksp_type": "gmres", "pc_type": "gamg", "ksp_monitor": None}  # linear solver parameters
+        self.lsp = {
+            "ksp_type": "gmres",
+            "pc_type": "gamg",
+            "ksp_monitor": None}  # linear solver parameters
 
         # proprieties
         self.spatial_dimension: int = spatial_dimension  # spatial dimension
@@ -91,16 +140,16 @@ class RHSimulation:
         self.out_folder_name = out_folder_name
 
         # flags
-        self.recompute_mesh = not load_from_cache  # set if mesh should be recomputed
-        self.recompute_c0 = not load_from_cache  # set if c0 should be recomputed# set up error flag
+        self.recompute_mesh = (not load_from_cache)  # mesh should be recomputed
+        self.recompute_c0 = (not load_from_cache)  # set if c0 should be recomputed
         self.runtime_error_occurred = False  # flag to activate in case of sim errors
+        self.write_checkpoints: bool = write_checkpoints  # if True, write simulation with checkpoints
 
-        # folders
+        # Folders
         self.data_folder: Path = mansim.setup_data_folder(folder_path=f"saved_sim/{out_folder_name}",
                                                           auto_enumerate=out_folder_mode)
         self.report_folder: Path = self.data_folder / Path("sim_info")
         self.reproduce_folder: Path = self.data_folder / Path("0_reproduce")
-        # self.resume_folder: Path = self.data_folder / Path("resume")
         cache_folder = Path(".sim_cache")
         self.cache_mesh_folder: Path = cache_folder / Path("mesh")
         self.cache_c0_folder: Path = cache_folder / Path("c0")
@@ -170,6 +219,15 @@ class RHSimulation:
 
     def _fill_reproduce_folder(self):
         if rank == 0:
+            # patterns ignored when copying code after simulation
+            ignored_patterns = ["README.md",
+                                "saved_sim*",
+                                "*.ipynb_checkpoints*",
+                                "sif",
+                                "visualization",
+                                "*pycache*",
+                                ".thumbs"]
+
             # if reproduce folder exists, remove it
             if self.reproduce_folder.exists():
                 shutil.rmtree(str(self.reproduce_folder.resolve()))
@@ -213,16 +271,17 @@ class RHSimulation:
             # define c0 function
             self.c_old = fenics.Function(self.V.sub(0).collapse())
             # get 3d c0
-            get_3d_c0(self.c_old, self.patient_parameters, self.mesh_parameters, self.cache_c0_xdmf, self.recompute_c0)
+            get_3d_c0(self.c_old, self.patient_parameters, self.mesh_parameters, self.cache_c0_xdmf,
+                      self.recompute_c0, self.write_checkpoints)
         # name c_old
         self.c_old.rename("c", "capillaries")
 
         # auxiliary fun for capillaries, initially set to 0
-        logger.info("Computing mu0...")
+        logger.info(f"{self.out_folder_name}:Computing mu0...")
         self.mu_old = fenics.interpolate(fenics.Constant(0.), self.V.sub(0).collapse())
 
         # t_c_f_function (dynamic tip cell position)
-        logger.info("Computing t_c_f_function...")
+        logger.info(f"{self.out_folder_name}:Computing t_c_f_function...")
         self.t_c_f_function = fenics.interpolate(fenics.Constant(0.), self.V.sub(0).collapse())
         self.t_c_f_function.rename("tcf", "tip cells function")
 
@@ -234,7 +293,7 @@ class RHSimulation:
         Generate initial conditions not depending on from the simulaion parameters
         """
         # define initial condition for tumor
-        logger.info("Computing phi0...")
+        logger.info(f"{self.out_folder_name}:Computing phi0...")
         # initial semiaxes of the tumor
         self.phi_expression = get_growing_RH_expression(sim_parameters,
                                                         self.patient_parameters,
@@ -246,13 +305,13 @@ class RHSimulation:
         self.phi.rename("phi", "retinal hemangioblastoma")
 
         # af
-        logger.info("Computing af0...")
+        logger.info(f"{self.out_folder_name}:Computing af0...")
         self.af_old = fenics.Function(self.V.sub(0).collapse())
         self.__compute_af_0(sim_parameters)
         self.af_old.rename("af", "angiogenic factor")
 
         # af gradient
-        logger.info("Computing grad_af0...")
+        logger.info(f"{self.out_folder_name}:Computing grad_af0...")
         self.ge = GradientEvaluator()
         self.grad_af_old = fenics.Function(self.vec_V)
         self.ge.compute_gradient(self.af_old, self.vec_V, self.grad_af_old, self.lsp)
@@ -304,6 +363,32 @@ class RHSimulation:
                          file=self.pbar_file,
                          disable=True if rank != 0 else False)
 
+    def _end_simulation(self):
+        logger.info("Ending simulation... ")
+
+        # close pbar file
+        if (rank == 0) and (self.slurm_job_id is not None):
+            self.pbar_file.close()
+
+        # save sim report
+        if self.runtime_error_occurred:
+            sim_description = "RUNTIME ERROR OCCURRED. \n" + self.sim_rationale
+        else:
+            sim_description = self.sim_rationale
+        sim_time = time.perf_counter() - self.init_time
+        mansim.save_sim_info(data_folder=self.report_folder,
+                             parameters={"Sim parameters:": self.sim_parameters,
+                                         "Mesh parameters": self.mesh_parameters},
+                             execution_time=sim_time,
+                             sim_name=self.out_folder_name,
+                             sim_description=sim_description,
+                             error_msg=self.error_msg)
+
+        # save parameters
+        write_parameters(self.sim_parameters, self.report_folder / Path("sim_parameters.csv"))
+        write_parameters(self.mesh_parameters, self.report_folder / Path("mesh_parameters.csv"))
+        dump_json(self.patient_parameters, self.report_folder / Path("patient_parameters.json"))
+
 
 class RHTimeSimulation(RHSimulation):
     def __init__(self,
@@ -317,7 +402,9 @@ class RHTimeSimulation(RHSimulation):
                  sim_rationale: str = "No comment",
                  slurm_job_id: int = None,
                  activate_logger: bool = False,
-                 load_from_cache: bool = False):
+                 load_from_cache: bool = False,
+                 write_checkpoints: bool = True,
+                 save_distributed_files_to: str or None = None):
         """
         Initialize a Simulation Object.
 
@@ -349,23 +436,43 @@ class RHTimeSimulation(RHSimulation):
                          sim_rationale=sim_rationale,
                          slurm_job_id=slurm_job_id,
                          activate_logger=activate_logger,
-                         load_from_cache=load_from_cache)
+                         load_from_cache=load_from_cache,
+                         write_checkpoints=write_checkpoints)
 
         # specific properties
         self.steps: int = steps  # simulations steps
         self.save_rate: int = save_rate  # set how often writes the output
 
         # specific flags
-        self.__resumed = False  # secret flag to check if simulation has been resumed
+        self.__resumed: bool = False  # secret flag to check if simulation has been resumed
+        self.save_distributed_files = (save_distributed_files_to is not None)  # Use PVD files instead of XDMF
 
         # specific folders
         self.resume_folder: Path = self.data_folder / Path("resume")
+        if self.save_distributed_files:
+            distributed_data_folder = Path(save_distributed_files_to) / Path(self.data_folder.name)
+            pvd_folder = self.data_folder / Path("pvd")
+            # clean out folders if they exist
+            rmtree_if_exists_once_per_node(distributed_data_folder)
+            if rank == 0:
+                if pvd_folder.exists():
+                    shutil.rmtree(pvd_folder)
+            self.distributed_data_folder = distributed_data_folder
+            self.pvd_folder = pvd_folder
 
-        # specific XDMF files
-        self.c_xdmf, self.af_xdmf, self.grad_af_xdmf, self.tipcells_xdmf, self.phi_xdmf = fu.setup_xdmf_files(
-            ["c", "af", "grad_af", "tipcells", "phi"],
-            self.data_folder,
-            {"flush_output": True, "rewrite_function_mesh": False})
+        # specific files
+        file_names = ["c", "af", "grad_af", "tipcells", "phi"]
+        if self.save_distributed_files:
+            # specific PVD files
+            self.c_pvd, self.af_pvd, self.grad_af_pvd, self.tipcells_pvd, self.phi_pvd = \
+                [fenics.File(str(self.distributed_data_folder / Path(f"{fn}.pvd"))) for fn in file_names]
+        else:
+            # specific XDMF files
+            self.c_xdmf, self.af_xdmf, self.grad_af_xdmf, self.tipcells_xdmf, self.phi_xdmf = fu.setup_xdmf_files(
+                file_names,
+                self.data_folder,
+                {"flush_output": True, "rewrite_function_mesh": False})
+
         self.__resume_files_dict: Dict or None = None  # dictionary containing files to resume
 
     def run(self) -> bool:
@@ -391,7 +498,7 @@ class RHTimeSimulation(RHSimulation):
             self._generate_initial_conditions()  # generate initial condition
 
         # write initial conditions
-        self.__write_xdmf_files(0)
+        self.__write_files(0)
 
         self._time_iteration()  # run simulation in time
 
@@ -404,15 +511,18 @@ class RHTimeSimulation(RHSimulation):
         super()._check_simulation_properties()
 
         # check if steps is positive
-        assert self.steps > 0, "Simulation should have a positive number of steps"
+        assert self.steps >= 0, "Simulation should have a positive number of steps"
 
     def _sim_mkdir(self):
         super()._sim_mkdir_list(self.data_folder, self.report_folder, self.reproduce_folder,
                                 self.resume_folder, self.cache_mesh_folder, self.cache_c0_folder)
+        if self.save_distributed_files:
+            # make directories for distributed save
+            super()._sim_mkdir_list(self.distributed_data_folder, self.pvd_folder)
 
     def _resume_mesh(self):
         assert self.__resumed, "Trying to resume mesh but simulation was not resumed"
-        logger.info("Loading Mesh... ")
+        logger.info(f"{self.out_folder_name}:Loading Mesh... ")
         mesh = fenics.Mesh()
         with fenics.XDMFFile(str(self.__resume_files_dict["mesh.xdmf"])) as infile:
             infile.read(mesh)
@@ -433,7 +543,7 @@ class RHTimeSimulation(RHSimulation):
         last_step = max([int(step.replace("step_", "")) for step in input_itc])
 
         # capillaries
-        logger.info("Loading c0... ")
+        logger.info(f"{self.out_folder_name}:Loading c0... ")
         self.c_old = fenics.Function(self.V.sub(0).collapse())
         resume_c_xdmf = fenics.XDMFFile(str(self.__resume_files_dict["c.xdmf"]))
         with resume_c_xdmf as infile:
@@ -441,14 +551,14 @@ class RHTimeSimulation(RHSimulation):
         self.c_old.rename("c", "capillaries")
 
         # mu
-        logger.info("Loading mu... ")
+        logger.info(f"{self.out_folder_name}:Loading mu... ")
         self.mu_old = fenics.Function(self.V.sub(0).collapse())
         resume_mu_xdmf = fenics.XDMFFile(str(self.__resume_files_dict["mu.xdmf"]))
         with resume_mu_xdmf as infile:
             infile.read_checkpoint(self.mu_old, "mu", 0)
 
         # phi
-        logger.info("Generating phi... ")
+        logger.info(f"{self.out_folder_name}:Generating phi... ")
         self.phi_expression = get_growing_RH_expression(self.sim_parameters,
                                                         self.patient_parameters,
                                                         self.mesh_parameters,
@@ -463,7 +573,7 @@ class RHTimeSimulation(RHSimulation):
         self.t_c_f_function.rename("tcf", "tip cells function")
 
         # af
-        logger.info("Loading af... ")
+        logger.info(f"{self.out_folder_name}:Loading af... ")
         self.af_old = fenics.Function(self.V.sub(0).collapse())
         resume_af_xdmf = fenics.XDMFFile(str(self.__resume_files_dict["af.xdmf"]))
         with resume_af_xdmf as infile:
@@ -471,7 +581,7 @@ class RHTimeSimulation(RHSimulation):
         self.af_old.rename("af", "angiogenic factor")
 
         # af gradient
-        logger.info("Loading af_grad... ")
+        logger.info(f"{self.out_folder_name}:Loading af_grad... ")
         self.ge = GradientEvaluator()
         self.grad_af_old = fenics.Function(self.vec_V)
         resume_grad_af_xdmf = fenics.XDMFFile(str(self.__resume_files_dict["grad_af.xdmf"]))
@@ -492,17 +602,36 @@ class RHTimeSimulation(RHSimulation):
         # definie initial time
         self.t0 = last_step
 
-    def __write_xdmf_files(self, t: int):
+    def __write_files(self, t: int):
         # write files
-        self.af_xdmf.write(self.af_old, t)
-        self.c_xdmf.write(self.c_old, t)
-        self.grad_af_xdmf.write(self.grad_af_old, t)
-        self.phi_xdmf.write(self.phi, t)
-        # save tip cells current position
-        self.tipcells_xdmf.write(self.t_c_f_function, t)
+        if self.save_distributed_files:
+            logger.info(f"Starting writing of PVD files ")
+            logger.info(f"Writing af_pvd... ")
+            self.af_pvd << (self.af_old, t)
+            logger.info(f"Writing c_pvd... ")
+            self.c_pvd << (self.c_old, t)
+            logger.info(f"Writing grad_af_pvd... ")
+            self.grad_af_pvd << (self.grad_af_old, t)
+            logger.info(f"Writing phi_pvd... ")
+            self.phi_pvd << (self.phi, t)
+            logger.info(f"Writing tipcells_pvd... ")
+            self.tipcells_pvd << (self.t_c_f_function, t)
+        else:
+            logger.info(f"Starting writing of XDMF files ")
+            logger.info(f"Writing af_xdmf... ")
+            self.af_xdmf.write(self.af_old, t)
+            logger.info(f"Writing c_xdmf... ")
+            self.c_xdmf.write(self.c_old, t)
+            logger.info(f"Writing grad_af_xdmf... ")
+            self.grad_af_xdmf.write(self.grad_af_old, t)
+            logger.info(f"Writing phi_xdmf... ")
+            self.phi_xdmf.write(self.phi, t)
+            # save tip cells current position
+            logger.info(f"Writing tipcells_xdmf... ")
+            self.tipcells_xdmf.write(self.t_c_f_function, t)
 
     def _time_iteration(self):
-        logger.info("Defining weak form...")
+        logger.info(f"{self.out_folder_name}:Defining weak form...")
 
         # define variable functions
         u = fenics.Function(self.V)
@@ -516,7 +645,7 @@ class RHTimeSimulation(RHSimulation):
                                                                                  self.sim_parameters)
         form = af_form + capillaries_form
 
-        logger.info("Defining problem...")
+        logger.info(f"{self.out_folder_name}:Defining problem...")
 
         # define Jacobian
         J = fenics.derivative(form, u)
@@ -531,7 +660,7 @@ class RHTimeSimulation(RHSimulation):
         super()._set_pbar(total=self.steps)
 
         # log
-        logger.info("Starting time iteration...")
+        logger.info(f"{self.out_folder_name}:Starting time iteration...")
         # iterate in time
         for step in range(1, self.steps + 1):
             # update time
@@ -557,7 +686,7 @@ class RHTimeSimulation(RHSimulation):
                 # store error info
                 self.runtime_error_occurred = True
                 self.error_msg = str(e)
-                logger.error(self.error_msg)
+                logger.error(str(e))
                 # stop simulation
                 break
 
@@ -571,44 +700,29 @@ class RHTimeSimulation(RHSimulation):
 
             # save
             if (step % self.save_rate == 0) or (step == self.steps) or self.runtime_error_occurred:
-                self.__write_xdmf_files(t)
+                self.__write_files(step)
 
             # update progress bar
             self.pbar.update(1)
 
     def _end_simulation(self):
-        # close pbar file
-        if (rank == 0) and (self.slurm_job_id is not None):
-            self.pbar_file.close()
-
         # save resume info
-        self.__save_resume_info()
+        if self.write_checkpoints:
+            self.__save_resume_info()
 
-        # save sim report
-        if self.runtime_error_occurred:
-            sim_description = "RUNTIME ERROR OCCURRED. \n" + self.sim_rationale
-        else:
-            sim_description = self.sim_rationale
-        mansim.save_sim_info(data_folder=self.report_folder,
-                             parameters={"Sim parameters:": self.sim_parameters,
-                                         "Mesh parameters": self.mesh_parameters},
-                             execution_time=time.perf_counter() - self.init_time,
-                             sim_name=self.out_folder_name,
-                             sim_description=sim_description,
-                             error_msg=self.error_msg)
+        # mv distributed files to data folder
+        if self.save_distributed_files:
+            move_files_once_per_node(src_folder=self.distributed_data_folder, dst=self.pvd_folder)
 
-        # save parameters
-        write_parameters(self.sim_parameters, self.report_folder / Path("sim_parameters.csv"))
-        write_parameters(self.mesh_parameters, self.report_folder / Path("mesh_parameters.csv"))
-        dump_json(self.patient_parameters, self.report_folder / Path("patient_parameters.json"))
-
-        comm_world.Barrier()  # wait for all processes
+        super()._end_simulation()
 
     def __save_resume_info(self):
         """
         Save the mesh and/or the fenics Functions in a resumable format (i.e. using the FEniCS function
         `write_checkpoint`).
         """
+        logger.info("Starting checkpoint write")
+
         # init list of saved file
         saved_files = {}
 
@@ -621,6 +735,7 @@ class RHTimeSimulation(RHSimulation):
         for name, fnc in fnc_dict.items():
             file_name = f"{self.resume_folder}/{name}.xdmf"
             with fenics.XDMFFile(file_name) as outfile:
+                logger.info(f"Checkpoint writing of {name}....")
                 outfile.write_checkpoint(fnc, name, 0, fenics.XDMFFile.Encoding.HDF5, False)
             saved_files[name] = str(Path(file_name).resolve())
 
@@ -638,7 +753,8 @@ class RHTimeSimulation(RHSimulation):
                out_folder_mode: str = None,
                sim_rationale: str = "No comment",
                slurm_job_id: int = None,
-               activate_logger: bool = False):
+               activate_logger: bool = False,
+               write_checkpoints: bool = True):
         """
         Resume a simulation stored in a given folder.
 
@@ -659,11 +775,12 @@ class RHTimeSimulation(RHSimulation):
         :param slurm_job_id: slurm job ID assigned to the simulation, if performed with slurm. It is used to generate a
         pbar stored in ``slurm/<slurm job ID>.pbar``.
         :param activate_logger: activate the standard logger to save detailed information on the simulation activity.
+        :param write_checkpoints: set to True to save simulation with checkpoints
         """
         # ----------------------------------------------------------------------------------------------------------- #
         # 1. Check resume folder consistency
         # ----------------------------------------------------------------------------------------------------------- #
-        logger.info("Checking if it's possible to resume simulation ... ")
+        logger.info(f"{out_folder_name}: Checking if it's possible to resume simulation ... ")
 
         # init error msg
         error_msg_preamble = "Not enough info to resume."
@@ -710,64 +827,11 @@ class RHTimeSimulation(RHSimulation):
                          out_folder_mode=out_folder_mode,
                          sim_rationale=sim_rationale,
                          slurm_job_id=slurm_job_id,
-                         activate_logger=activate_logger)
+                         activate_logger=activate_logger,
+                         write_checkpoints=write_checkpoints)
         simulation.__resumed = True
         simulation.__resume_files_dict = resume_files_dict
         return simulation
-
-
-class GradientEvaluator:
-    """
-    Class to efficiently compute the af gradient. Defined to avoid the use of ``fenics.project(grad(af), V)``.
-    This class keep the solver for the gradient saved, so to reuse it every time it is required.
-    """
-    def __init__(self):
-        self.solver = None
-
-    def compute_gradient(self,
-                         f: fenics.Function,
-                         V: fenics.FunctionSpace,
-                         sol: fenics.Function,
-                         options: Dict = None):
-        """
-        Efficiently compute the gradient of a function.
-
-        :param f: function to be derived.
-        :param V: f's function space.
-        :param sol: function to store the gradient.
-        :param options: options for the solver to be used.
-        """
-        # manage none dict
-        if options is None:
-            options = {}
-        # define test function
-        v = fenics.TestFunction(V)
-        # define variational form
-        if self.solver is None:
-            # define trial function
-            u = fenics.TrialFunction(V)
-            # define operator
-            A = fenics.PETScMatrix()
-            a = fenics.dot(u, v) * fenics.dx
-            fenics.assemble(a, tensor=A)
-            # define solver
-            petsc_options = PETSc.Options()
-            for option, value in options.items():
-                petsc_options.setValue(option, value)
-            ksp = PETSc.KSP().create()
-            ksp.setFromOptions()
-            ksp.setOperators(fenics.as_backend_type(A).mat())
-            # set solver
-            self.solver = ksp
-
-        # define b
-        L = fenics.inner(fenics.grad(f), v) * fenics.dx
-        b = fenics.PETScVector()
-        fenics.assemble(L, tensor=b)
-        b = fenics.as_backend_type(b).vec()
-        # solve
-        self.solver.solve(b, sol.vector().vec())
-        sol.vector().update_ghost_values()
 
 
 class RHTestTipCellActivation(RHSimulation):
@@ -780,7 +844,8 @@ class RHTestTipCellActivation(RHSimulation):
                  sim_rationale: str = "No comment",
                  slurm_job_id: int = None,
                  activate_logger: bool = False,
-                 load_from_cache: bool = False):
+                 load_from_cache: bool = False,
+                 write_checkpoints: bool = True):
         # init super class
         super().__init__(spatial_dimension=spatial_dimension,
                          sim_parameters=standard_params,
@@ -790,7 +855,8 @@ class RHTestTipCellActivation(RHSimulation):
                          sim_rationale=sim_rationale,
                          slurm_job_id=slurm_job_id,
                          activate_logger=activate_logger,
-                         load_from_cache=load_from_cache)
+                         load_from_cache=load_from_cache,
+                         write_checkpoints=write_checkpoints)
 
         self.df_standard_params: pd.DataFrame = self.sim_parameters.as_dataframe()
 
@@ -916,34 +982,76 @@ class RHTestTipCellActivation(RHSimulation):
         return tip_cell_activation_df
 
     def _end_simulation(self):
-        # close pbar file
-        if (rank == 0) and (self.slurm_job_id is not None):
-            self.pbar_file.close()
-            # save sim report
+        # add param dictionary to sim description
+        self.sim_rationale = (f"{self.sim_rationale}\n"
+                              f"The following parameters where changed to the values in brakets\n")
+        for p, l in self.params_dictionary.items():
+            self.sim_rationale += f"- {p}: {l}\n"
 
-        # generate sim description
-        sim_description = (f"{self.sim_rationale}\n"
-                           f"The following parameters where changed to the values in brakets\n")
-        for p, l in self.params_dictionary:
-            sim_description += f"- {p}: {l}\n"
-        if self.runtime_error_occurred:
-            sim_description = "RUNTIME ERROR OCCURRED. \n" + sim_description
+        super()._end_simulation()
 
-        # save sim_info
-        mansim.save_sim_info(data_folder=self.report_folder,
-                             parameters={"Sim parameters:": self.sim_parameters,
-                                         "Mesh parameters": self.mesh_parameters},
-                             execution_time=time.perf_counter() - self.init_time,
-                             sim_name=self.out_folder_name,
-                             sim_description=sim_description,
-                             error_msg=self.error_msg)
 
-        # save parameters
-        write_parameters(self.sim_parameters, self.report_folder / Path("sim_parameters.csv"))
-        write_parameters(self.mesh_parameters, self.report_folder / Path("mesh_parameters.csv"))
-        dump_json(self.patient_parameters, self.report_folder / Path("patient_parameters.json"))
-
-        comm_world.Barrier()  # wait for all processes
+# class RHTestConvergence(RHSimulation):
+#     def __init__(self,
+#                  sim_parameters: Parameters,
+#                  patient_parameters: Dict,
+#                  out_folder_name: str,
+#                  slurm_job_id: int,
+#                  write_checkpoint: bool = False):
+#         super().__init__(spatial_dimension=3,
+#                          sim_parameters=sim_parameters,
+#                          patient_parameters=patient_parameters,
+#                          out_folder_name=out_folder_name,
+#                          slurm_job_id=slurm_job_id,
+#                          write_checkpoints=write_checkpoint)
+#         # init linear solver parameters list
+#         self.lsp_list = {
+#             "snes_type": ['anderson', 'aspin', 'composite', 'fas', 'ksponly', 'ksptransposeonly', 'ms', 'nasm', 'ncg',
+#                           'newtonls', 'newtontr', 'ngmres', 'ngs', 'nrichardson', 'patch', 'python', 'qn', 'shell',
+#                           'vinewtonrsls', 'vinewtonssls'],
+#             "ksp_type": ['bcgs', 'bcgsl', 'bicg', 'cg', 'cgls', 'cgne', 'cgs', 'chebyshev', 'cr', 'dgmres', 'fbcgs',
+#                          'fbcgsr', 'fcg', 'fetidp', 'fgmres', 'gcr', 'gltr', 'gmres', 'groppcg', 'hpddm', 'ibcgs',
+#                          'lcd', 'lgmres', 'lsqr', 'minres', 'nash', 'pgmres', 'pipebcgs', 'pipecg', 'pipecgrr',
+#                          'pipecr', 'pipefcg', 'pipefgmres', 'pipegcr', 'pipelcg', 'preonly', 'python', 'qcg',
+#                          'richardson', 'stcg', 'symmlq', 'tcqmr', 'tfqmr', 'tsirm'],
+#             "pc_type": ['asm', 'bddc', 'bfbt', 'bjacobi', 'cholesky', 'chowiluviennacl', 'composite', 'cp', 'deflation',
+#                         'eisenstat', 'exotic', 'fieldsplit', 'galerkin', 'gamg', 'gasm', 'hmg', 'hpddm', 'hypre', 'icc',
+#                         'ilu', 'jacobi', 'kaczmarz', 'ksp', 'lmvm', 'lsc', 'lu', 'mat', 'mg', 'ml', 'nn', 'none',
+#                         'parms', 'patch', 'pbjacobi', 'pfmg', 'python', 'redistribute', 'redundant',
+#                         'rowscalingviennacl', 'saviennacl', 'shell', 'sor', 'spai', 'svd', 'syspfmg',
+#                         'telescope', 'tfs', 'vpbjacobi']
+#         }
+#
+#     def run(self):
+#         self._check_simulation_properties()  # Check class proprieties. Return error if something does not work.
+#
+#         self._sim_mkdir()  # create all simulation folders
+#
+#         self._fill_reproduce_folder()  # store current script in reproduce folder to keep track of the code
+#
+#         if self.__resumed:
+#             self._resume_mesh()  # load mesh
+#         else:
+#             self._generate_mesh()  # generate mesh
+#
+#         self._spatial_discretization()  # initialize function space
+#
+#         if self.__resumed:
+#             self._resume_initial_conditions()  # resume initial conditions
+#         else:
+#             self._generate_initial_conditions()  # generate initial condition
+#
+#         # write initial conditions
+#         self.__write_files(0)
+#
+#         self._time_iteration()  # run simulation in time
+#
+#         self._end_simulation()  # conclude time iteration
+#
+#         return self.runtime_error_occurred
+#
+#     def _sim_mkdir(self):
+#         super()._sim_mkdir_list(self.data_folder)
 
 
 def run_simulation(spatial_dimension: int,
@@ -957,7 +1065,9 @@ def run_simulation(spatial_dimension: int,
                    slurm_job_id: int = None,
                    activate_logger: bool = False,
                    recompute_mesh: bool = False,
-                   recompute_c0: bool = False):
+                   recompute_c0: bool = False,
+                   write_checkpoints: bool = True,
+                   save_distributed_files_to: str or None = None):
     """
     Run a simulation and store the result
 
@@ -983,6 +1093,7 @@ def run_simulation(spatial_dimension: int,
     :param activate_logger: activate the standard logger to save detailed information on the simulation activity.
     :param recompute_mesh: recompute the mesh for the simulation
     :param recompute_c0: recompute c0 for the simulation. If False, the most recent c0 is used. Default is False.
+    :param write_checkpoints: set to True to save simulation with checkpoints
     """
     # ---------------------------------------------------------------------------------------------------------------- #
     #                                                 Init Simulation
@@ -1000,7 +1111,9 @@ def run_simulation(spatial_dimension: int,
         sim_rationale=sim_rationale,
         slurm_job_id=slurm_job_id,
         activate_logger=activate_logger,
-        load_from_cache=(not recompute_mesh) or (not recompute_c0)
+        load_from_cache=(not recompute_mesh) or (not recompute_c0),
+        write_checkpoints=write_checkpoints,
+        save_distributed_files_to=save_distributed_files_to
     )
     # run simulation
     simulation.run()
@@ -1015,7 +1128,8 @@ def resume_simulation(resume_from: str,
                       out_folder_mode: str = None,
                       sim_rationale: str = "No comment",
                       slurm_job_id: int = None,
-                      activate_logger: bool = False):
+                      activate_logger: bool = False,
+                      write_checkpoints: bool = True):
     """
     Resume a simulation stored in a given folder.
 
@@ -1036,6 +1150,7 @@ def resume_simulation(resume_from: str,
     :param slurm_job_id: slurm job ID assigned to the simulation, if performed with slurm. It is used to generate a pbar
     stored in ``slurm/<slurm job ID>.pbar``.
     :param activate_logger: activate the standard logger to save detailed information on the simulation activity.
+    :param write_checkpoints: set to True to save simulation with checkpoints
     """
     simulation = RHTimeSimulation.resume(resume_from=Path(resume_from),
                                          steps=steps,
@@ -1044,7 +1159,8 @@ def resume_simulation(resume_from: str,
                                          out_folder_mode=out_folder_mode,
                                          sim_rationale=sim_rationale,
                                          slurm_job_id=slurm_job_id,
-                                         activate_logger=activate_logger)
+                                         activate_logger=activate_logger,
+                                         write_checkpoints=write_checkpoints)
     # run simulation
     simulation.run()
 
@@ -1062,6 +1178,7 @@ def test_tip_cell_activation(spatial_dimension: int,
                              results_df: str = None,
                              recompute_mesh: bool = False,
                              recompute_c0: bool = False,
+                             write_checkpoints: bool = True,
                              **kwargs):
     simulation = RHTestTipCellActivation(spatial_dimension,
                                          standard_params=standard_sim_parameters,
@@ -1071,6 +1188,7 @@ def test_tip_cell_activation(spatial_dimension: int,
                                          sim_rationale=sim_rationale,
                                          slurm_job_id=slurm_job_id,
                                          activate_logger=activate_logger,
-                                         load_from_cache=(not recompute_mesh) or (not recompute_c0))
+                                         load_from_cache=(not recompute_mesh) or (not recompute_c0),
+                                         write_checkpoints=write_checkpoints)
 
     return simulation.run(results_df, **kwargs)

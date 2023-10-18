@@ -37,9 +37,9 @@ def get_growing_RH_expression(sim_parameters: Parameters,
 
     # compute initial semiaxes
     tdf_i = sim_parameters.get_value("tdf_i")
-    semiax_x0 = tdf_i * (lateral_ax.magnitude / 2)
-    semiax_y0 = tdf_i * (lateral_ax.magnitude / 2)
-    semiax_z0 = tdf_i * (axial_ax.magnitude / 2)
+    semiax_x0 = (tdf_i ** (1/3)) * (lateral_ax.magnitude / 2)
+    semiax_y0 = (tdf_i ** (1/3)) * (lateral_ax.magnitude / 2)
+    semiax_z0 = (tdf_i ** (1/3)) * (axial_ax.magnitude / 2)
 
     # write cpp code for time variant semiaxes
     cpp_semiax_x = "(sa_xi * pow(tgr, t / 3))"
