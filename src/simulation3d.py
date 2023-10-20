@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Dict, Tuple
 import skimage.io as io
 from mocafe.fenut.parameters import Parameters
-from src.expressions import Vessel3DReconstruction
+from src.expressions import Vessel3DReconstruction2
 from src.ioutils import read_parameters, write_parameters
 
 # get process rank
@@ -211,19 +211,20 @@ def _compute_3d_c_0(c_old: fenics.Function,
     """
     # load images
     pic2d_file = patient_parameters["pic2d"]
-    pic2d_skeleton_file = pic2d_file.replace("pic2d.png", "pic2d_skeleton.png")
-    pic2d_edges_file = pic2d_file.replace("pic2d.png", "pic2d_edges.png")
+    # pic2d_skeleton_file = pic2d_file.replace("pic2d.png", "pic2d_skeleton.png")
+    # pic2d_edges_file = pic2d_file.replace("pic2d.png", "pic2d_edges.png")
+    pic2d_dt_file = pic2d_file.replace("pic2d.png", "pic2d_dt.npy")
     binary = io.imread(pic2d_file)
-    skeleton = io.imread(pic2d_skeleton_file)
-    edges = io.imread(pic2d_edges_file)
+    # skeleton = io.imread(pic2d_skeleton_file)
+    # edges = io.imread(pic2d_edges_file)
+    pic2d_distance_transform = np.load(pic2d_dt_file)
     half_depth = patient_parameters["half_depth"]
-    c_old_expression = Vessel3DReconstruction(z_0=mesh_parameters.get_value("Lz") - half_depth,
-                                              skeleton_array=skeleton,
-                                              edge_array=edges,
-                                              binary_array=binary,
-                                              mesh_Lx=mesh_parameters.get_value("Lx"),
-                                              mesh_Ly=mesh_parameters.get_value("Ly"),
-                                              half_depth=half_depth)
-    del binary, skeleton, edges
+    c_old_expression = Vessel3DReconstruction2(z_0=mesh_parameters.get_value("Lz") - half_depth,
+                                               binary_array=binary,
+                                               distance_transform_array=pic2d_distance_transform,
+                                               mesh_Lx=mesh_parameters.get_value("Lx"),
+                                               mesh_Ly=mesh_parameters.get_value("Ly"),
+                                               half_depth=half_depth)
+    del binary, pic2d_distance_transform
 
     c_old.interpolate(c_old_expression)

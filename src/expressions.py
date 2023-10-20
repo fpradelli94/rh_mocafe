@@ -1,13 +1,18 @@
 """
 File containing the FEniCS Expressions used throughout the simulation
 """
-import fenics
-import numpy as np
 import pint
+import fenics
+import logging
+import numpy as np
 from typing import Dict
 from PIL import Image
 from mocafe.math import sigmoid
 from mocafe.fenut.parameters import Parameters
+from skimage import morphology
+
+
+logger = logging.getLogger(__name__)
 
 
 def get_growing_RH_expression(sim_parameters: Parameters,
@@ -156,15 +161,19 @@ class Vessel3DReconstruction(fenics.UserExpression):
         self.n_p_y = skeleton_array.shape[0]
 
         # get center points
-        normalized_skeleton_array = skeleton_array / np.amax(skeleton_array)
-        self.center_points = self._get_ones_spatial_coordinates(normalized_skeleton_array)
+        boolean_skeleton_array = skeleton_array.astype(bool)
+        self.center_points = self._get_ones_spatial_coordinates(boolean_skeleton_array)
 
         # get edge points
-        normalized_edge_array = edge_array / np.amax(edge_array)
-        self.edge_points = self._get_ones_spatial_coordinates(normalized_edge_array)
+        boolean_edge_array = edge_array.astype(bool)
+        self.edge_points = self._get_ones_spatial_coordinates(boolean_edge_array)
 
-        # save binary array
-        self.binary_array = binary_array / np.amax(binary_array)
+        # get binary array as boolean
+        boolean_binary_array = binary_array.astype(bool)
+        # merge binary array with edge array.
+        # Otherwise, the estimation of the vessel radius will be higher in the axial plane.
+        bin_edges_composition = boolean_binary_array | boolean_edge_array
+        self.bin_edges_composition = bin_edges_composition
 
     def _get_ones_spatial_coordinates(self, input_image: np.ndarray):
         """
@@ -173,11 +182,12 @@ class Vessel3DReconstruction(fenics.UserExpression):
 
         :return: list of spatial coordinates
         """
-        # get non zero points indices
+        # get indices for nonzero points
         nonzero_indices = input_image.nonzero()
-        # `convert indices to spatial coord
+        # Convert indices to spatial coord
+        # Each index is converted to the spatial coordinates of the pixel midpoint
         sc_list = [
-            [self.mesh_Lx * (ind_x / self.n_p_x), self.mesh_Ly * (1 - (ind_y / self.n_p_y)), self.z_0]
+            [self.mesh_Lx * ((ind_x + 0.5) / self.n_p_x), self.mesh_Ly * (1 - ((ind_y + 0.5) / self.n_p_y)), self.z_0]
             for ind_x, ind_y in zip(nonzero_indices[1], nonzero_indices[0])
         ]
         # convert spatial coordinates to ndarray
@@ -191,7 +201,7 @@ class Vessel3DReconstruction(fenics.UserExpression):
             j = int(np.floor((x[0] / self.mesh_Lx) * (self.n_p_x - 1)))
             i = (self.n_p_y - 1) - int(np.floor((x[1] / self.mesh_Ly) * (self.n_p_y - 1)))
 
-            if np.isclose(self.binary_array[i, j], 1.):
+            if self.bin_edges_composition[i, j] > 0:
                 # get x distances from center points
                 distance_to_c = np.sqrt(np.sum((x - self.center_points) ** 2, axis=1))
                 # get min distance and indices of the closest c
@@ -209,6 +219,92 @@ class Vessel3DReconstruction(fenics.UserExpression):
 
                 # distance between closest c and closest e
                 distance_ce = np.sqrt(np.sum((closest_e - closest_c) ** 2))
+
+                # set value accordingly
+                values[0] = sigmoid(distance_to_closest_c, distance_ce, 1., -1., 100)
+            else:
+                values[0] = -1.
+        else:
+            values[0] = -1.
+
+    def value_shape(self):
+        return ()
+
+
+class Vessel3DReconstruction2(fenics.UserExpression):
+    """
+    Generate the 3D reconstruction of the putative initial capillary network.
+    """
+    def __init__(self,
+                 z_0: float,
+                 binary_array: np.ndarray,
+                 distance_transform_array: np.ndarray,
+                 mesh_Lx,
+                 mesh_Ly,
+                 half_depth):
+        super(Vessel3DReconstruction2, self).__init__()
+        # save z0 value
+        self.z_0 = z_0
+
+        # save Lx and Ly
+        self.mesh_Lx = mesh_Lx
+        self.mesh_Ly = mesh_Ly
+        self.half_depth = half_depth
+
+        # check if image ratio is preserved
+        if not np.isclose(mesh_Lx / mesh_Ly, binary_array.shape[1] / binary_array.shape[0]):
+            raise RuntimeError("Mesh and image must have the same ratio")
+
+        # get number of pixel
+        self.n_p_x = binary_array.shape[1]
+        self.n_p_y = binary_array.shape[0]
+
+        # save binary array as property
+        boolean_binary_array = binary_array.astype(bool)
+        # dilate binary (improves roundness)
+        self.boolean_binary_array = morphology.binary_dilation(boolean_binary_array)
+
+        # get center points and their distance to the edge
+        self._build_center_points_and_radiuses(distance_transform_array)
+
+    def _build_center_points_and_radiuses(self, distance_transform_array):
+        # convert distance_transform to spatial dimensions
+        converted_distance_transform_array = (distance_transform_array / self.n_p_x) * self.mesh_Lx
+
+        # get nonzero indices
+        nonzero_indices = distance_transform_array.nonzero()
+
+        # convert indices to spatial coordinates (midpoint of the pixel)
+        sc_list = [
+            [self.mesh_Lx * ((ind_x + 0.5) / self.n_p_x), self.mesh_Ly * (1 - ((ind_y + 0.5) / self.n_p_y)), self.z_0]
+            for ind_x, ind_y in zip(nonzero_indices[1], nonzero_indices[0])
+        ]
+
+        # set sc_list as property
+        self.center_points = np.array(sc_list)
+        logger.debug(f"Found center points: {self.center_points}")
+
+        # get radiuses
+        self.distance_to_edge_for_center = converted_distance_transform_array[nonzero_indices]
+        logger.debug(f"Found distances: {self.distance_to_edge_for_center}")
+
+    def eval(self, values, x):
+        # check if point is out of depth
+        if (self.z_0 - self.half_depth) < x[2] < (self.z_0 + self.half_depth):
+
+            # check if point correspond to True in binary array
+            j = int(np.floor((x[0] / self.mesh_Lx) * (self.n_p_x - 1)))
+            i = (self.n_p_y - 1) - int(np.floor((x[1] / self.mesh_Ly) * (self.n_p_y - 1)))
+            if self.boolean_binary_array[i, j]:
+                # get x distances from center points
+                distance_to_c = np.sqrt(np.sum((x - self.center_points) ** 2, axis=1))
+
+                # get min distance and indices of the closest c
+                distance_to_closest_c = np.amin(distance_to_c)
+                closest_c_index = np.argmin(distance_to_c)
+
+                # distance between closest c and closest e
+                distance_ce = self.distance_to_edge_for_center[closest_c_index]
 
                 # set value accordingly
                 values[0] = sigmoid(distance_to_closest_c, distance_ce, 1., -1., 100)
