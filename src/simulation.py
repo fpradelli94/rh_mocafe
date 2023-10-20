@@ -940,10 +940,7 @@ class RHTestTipCellActivation(RHSimulation):
 
         else:
             # else create default params dictionary
-            tumor_diameter_range = np.linspace(float(self.df_standard_params.loc["tdf_i", "sim_value"]) / 10,
-                                               float(self.df_standard_params.loc["tdf_i", "sim_value"]),
-                                               num=5,
-                                               endpoint=True)
+            tdf_i_range = np.linspace(start=0.2, stop=1.0, num=5, endpoint=True)
             D_af_range = [float(self.df_standard_params.loc["D_af", "sim_range_min"]),
                           float(self.df_standard_params.loc["D_af", "sim_value"] / 10),
                           float(self.df_standard_params.loc["D_af", "sim_value"]),
@@ -956,7 +953,7 @@ class RHTestTipCellActivation(RHSimulation):
                                         np.log10(10 * float(self.df_standard_params.loc["V_uc_af", "sim_value"])),
                                         num=5,
                                         endpoint=True)
-            params_dictionary = {"min_tumor_diameter": tumor_diameter_range,
+            params_dictionary = {"tdf_i": tdf_i_range,
                                  "D_af": D_af_range,
                                  "V_pT_af": V_pT_af_range,
                                  "V_uc_af": V_uc_af_range}
@@ -989,69 +986,6 @@ class RHTestTipCellActivation(RHSimulation):
             self.sim_rationale += f"- {p}: {l}\n"
 
         super()._end_simulation()
-
-
-# class RHTestConvergence(RHSimulation):
-#     def __init__(self,
-#                  sim_parameters: Parameters,
-#                  patient_parameters: Dict,
-#                  out_folder_name: str,
-#                  slurm_job_id: int,
-#                  write_checkpoint: bool = False):
-#         super().__init__(spatial_dimension=3,
-#                          sim_parameters=sim_parameters,
-#                          patient_parameters=patient_parameters,
-#                          out_folder_name=out_folder_name,
-#                          slurm_job_id=slurm_job_id,
-#                          write_checkpoints=write_checkpoint)
-#         # init linear solver parameters list
-#         self.lsp_list = {
-#             "snes_type": ['anderson', 'aspin', 'composite', 'fas', 'ksponly', 'ksptransposeonly', 'ms', 'nasm', 'ncg',
-#                           'newtonls', 'newtontr', 'ngmres', 'ngs', 'nrichardson', 'patch', 'python', 'qn', 'shell',
-#                           'vinewtonrsls', 'vinewtonssls'],
-#             "ksp_type": ['bcgs', 'bcgsl', 'bicg', 'cg', 'cgls', 'cgne', 'cgs', 'chebyshev', 'cr', 'dgmres', 'fbcgs',
-#                          'fbcgsr', 'fcg', 'fetidp', 'fgmres', 'gcr', 'gltr', 'gmres', 'groppcg', 'hpddm', 'ibcgs',
-#                          'lcd', 'lgmres', 'lsqr', 'minres', 'nash', 'pgmres', 'pipebcgs', 'pipecg', 'pipecgrr',
-#                          'pipecr', 'pipefcg', 'pipefgmres', 'pipegcr', 'pipelcg', 'preonly', 'python', 'qcg',
-#                          'richardson', 'stcg', 'symmlq', 'tcqmr', 'tfqmr', 'tsirm'],
-#             "pc_type": ['asm', 'bddc', 'bfbt', 'bjacobi', 'cholesky', 'chowiluviennacl', 'composite', 'cp', 'deflation',
-#                         'eisenstat', 'exotic', 'fieldsplit', 'galerkin', 'gamg', 'gasm', 'hmg', 'hpddm', 'hypre', 'icc',
-#                         'ilu', 'jacobi', 'kaczmarz', 'ksp', 'lmvm', 'lsc', 'lu', 'mat', 'mg', 'ml', 'nn', 'none',
-#                         'parms', 'patch', 'pbjacobi', 'pfmg', 'python', 'redistribute', 'redundant',
-#                         'rowscalingviennacl', 'saviennacl', 'shell', 'sor', 'spai', 'svd', 'syspfmg',
-#                         'telescope', 'tfs', 'vpbjacobi']
-#         }
-#
-#     def run(self):
-#         self._check_simulation_properties()  # Check class proprieties. Return error if something does not work.
-#
-#         self._sim_mkdir()  # create all simulation folders
-#
-#         self._fill_reproduce_folder()  # store current script in reproduce folder to keep track of the code
-#
-#         if self.__resumed:
-#             self._resume_mesh()  # load mesh
-#         else:
-#             self._generate_mesh()  # generate mesh
-#
-#         self._spatial_discretization()  # initialize function space
-#
-#         if self.__resumed:
-#             self._resume_initial_conditions()  # resume initial conditions
-#         else:
-#             self._generate_initial_conditions()  # generate initial condition
-#
-#         # write initial conditions
-#         self.__write_files(0)
-#
-#         self._time_iteration()  # run simulation in time
-#
-#         self._end_simulation()  # conclude time iteration
-#
-#         return self.runtime_error_occurred
-#
-#     def _sim_mkdir(self):
-#         super()._sim_mkdir_list(self.data_folder)
 
 
 def run_simulation(spatial_dimension: int,
