@@ -1,7 +1,6 @@
 import json
 import numpy as np
 from pathlib import Path
-from typing import Dict
 from skimage import io, measure, morphology, feature
 
 
@@ -48,14 +47,43 @@ def generate_edges_and_skeleton_for_pic2d(pic2d: Path):
     """
     Save the edges and the skeleton of the given Putative Initial Condition binary
     """
+    # load binary file
     patient = pic2d.stem.split("_")[0]
     pic2d_arr = io.imread(pic2d, as_gray=True).astype(bool)
-    skeleton = morphology.skeletonize(pic2d_arr)
+
+    # compute skeleton and distance transform
+    skeleton = morphology.medial_axis(pic2d_arr, return_distance=False)
     io.imsave(pic2d.parent / Path(f"{patient}_pic2d_skeleton.png"), skeleton)
-    edges = morphology.skeletonize(feature.canny(pic2d_arr, sigma=0.8))
+
+    # get edges as the esternal border of the original binary
+    edges = np.zeros(pic2d_arr.shape).astype(bool)
+    morphology.binary_dilation(pic2d_arr, out=edges)
+    edges[pic2d_arr == True] = False
     io.imsave(pic2d.parent / Path(f"{patient}_pic2d_edges.png"), edges)
 
 
+def generate_distance_transform_for_pic2d(pic2d: Path):
+    # load binary file
+    patient = pic2d.stem.split("_")[0]
+    pic2d_arr = io.imread(pic2d, as_gray=True).astype(bool)
+
+    # compute skeleton and distance
+    skeleton, dist = morphology.medial_axis(pic2d_arr, return_distance=True)
+
+    # compute distance transform
+    distance_transform = skeleton * dist
+
+    # save distance transform
+    np.save(pic2d.parent / Path(f"{patient}_pic2d_dt"), distance_transform)
+
+
 if __name__ == "__main__":
-    for pic2d in Path("../input_patients_data/3_pic_binaries").iterdir():
-        generate_edges_and_skeleton_for_pic2d(pic2d)
+    import matplotlib.pyplot as plt
+    fig, axs = plt.subplots(1, 3)
+    for i, pic2d in enumerate(Path("input_patients_data/3_pic_binaries").glob("*_pic2d_dt.npy")):
+        axs[i].imshow(np.load(pic2d))
+
+    plt.show()
+
+
+
