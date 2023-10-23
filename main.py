@@ -1,11 +1,15 @@
 import sys
 import json
 import logging
+import socket
 import subprocess
 import fenics
 import pandas as pd
+from pathlib import Path
 from mocafe.fenut.parameters import Parameters
 from src.simulation import run_simulation, resume_simulation, test_tip_cell_activation
+from src.experiments import check_tip_cell_activation_for_each_patient
+from visualization.python.activation_tiles import plot_activation_tiles
 
 
 # get process rank
@@ -17,10 +21,11 @@ rank = comm_world.Get_rank()
 
 # set up logger
 logger = logging.getLogger()
-logger.setLevel(logging.WARNING)
+logger.setLevel(logging.DEBUG)
 ch = logging.StreamHandler(stream=sys.stdout)
 ch.setLevel(logging.DEBUG)
-formatter = logging.Formatter(f"p{rank}:%(name)s:%(levelname)s: %(message)s")
+formatter = logging.Formatter(f"%(asctime)s (%(created)f) | host={socket.gethostname()}:p{rank} "
+                              f"| %(name)s:%(funcName)s:%(levelname)s: %(message)s")
 ch.setFormatter(formatter)
 logger.addHandler(ch)
 
@@ -111,12 +116,12 @@ def reproduce_results():
     # Below, we generate the simulation parameters form the notebook, and we get the slurm job ID, if any.
     # ---------------------------------------------------------------------------------------------------------------- #
 
-    # execute the notebook
-    parameters_nb = "notebooks/parameters.ipynb"
-    if rank == 0:
-        subprocess.run(["jupyter", "nbconvert", "--to", "html", "--execute", parameters_nb])
-
-    # load parameters as generated from the notebook
+    # # execute the notebook
+    # parameters_nb = "notebooks/parameters.ipynb"
+    # if rank == 0:
+    #     subprocess.run(["jupyter", "nbconvert", "--to", "html", "--execute", parameters_nb])
+    #
+    # # load parameters as generated from the notebook
     parameters_csv = "notebooks/out/g_parameters.csv"
     standard_parameters_df = pd.read_csv(parameters_csv, index_col="name")
 
@@ -129,8 +134,8 @@ def reproduce_results():
     else:
         slurm_job_id = None
 
-    # wait for all processes
-    comm_world.Barrier()
+    # # wait for all processes
+    # comm_world.Barrier()
 
     # ---------------------------------------------------------------------------------------------------------------- #
     # CODE FOR SIMULATION IN FIG 2
@@ -147,14 +152,14 @@ def reproduce_results():
     patient0_parameters = patients_parameters["patient0"]
 
     # change initial tumor diameter
-    sim_parameters.set_value("min_tumor_diameter", 0.5)  # correspond to d_0 (unit of measure is [sau])
+    sim_parameters.set_value("min_tumor_diameter", 1)  # correspond to d_0 (unit of measure is [sau])
 
     # run simulation
     run_simulation(spatial_dimension=3,
                    sim_parameters=sim_parameters,
                    patient_parameters=patient0_parameters,
-                   steps=2,
-                   save_rate=10,
+                   steps=200,
+                   save_rate=200,
                    out_folder_name="Fig2",
                    sim_rationale=f"Reproducing simulation in Fig 2",
                    slurm_job_id=slurm_job_id)
@@ -168,11 +173,14 @@ def reproduce_results():
     # script in ./rh_mocafe/visualization/python/tiles_plot.py
     # ---------------------------------------------------------------------------------------------------------------- #
 
-    # # test tip cell activation
-    # test_tip_cell_activation(spatial_dimension=3,
-    #                          df_standard_params=standard_parameters_df,
-    #                          patient_parameters=patient0_parameters,
-    #                          out_folder_name="Fig3")
+    # test tip cell activation
+    test_tip_cell_activation(spatial_dimension=3,
+                             standard_sim_parameters=sim_parameters,
+                             patient_parameters=patient0_parameters,
+                             out_folder_name="Fig3",
+                             slurm_job_id=slurm_job_id,
+                             recompute_mesh=True,
+                             recompute_c0=True)
 
     # ---------------------------------------------------------------------------------------------------------------- #
     # CODE FOR SIMULATIONS IN FIG 4a, 4b, 4c
@@ -185,13 +193,12 @@ def reproduce_results():
     sim_parameters = Parameters(standard_parameters_df)
 
     # set steps number
-    steps = 2
+    steps = 300
 
-    # compute initial tumor diameter, knowing that the final correspond to 600 um
-    td_f = sim_parameters.get_value("max_tumor_diameter")  # correspond to 600 um
+    # compute initial tumor diameter fraction, knowing that the final correspond to 1
     tgr = sim_parameters.get_value("tgr")
-    td_i = td_f / (tgr ** (steps / 3))
-    sim_parameters.set_value("min_tumor_diameter", td_i)  # correspond to d_0
+    tdf_i = tgr ** (-steps)
+    sim_parameters.set_value("tdf_i", tdf_i)
 
     # test for different uptake values
     V_uc_af_range = [21.1608695473508, 3.89679868445612, 0.7176]  # values given in [1 / tau]
@@ -205,7 +212,7 @@ def reproduce_results():
                        sim_parameters=sim_parameters,
                        patient_parameters=patient0_parameters,
                        steps=steps,
-                       save_rate=20,
+                       save_rate=300,
                        out_folder_name=sim_folder,
                        sim_rationale=f"Reproducing simulation in {sim_folder}",
                        slurm_job_id=slurm_job_id)
@@ -221,13 +228,12 @@ def reproduce_results():
     sim_parameters = Parameters(standard_parameters_df)
 
     # set steps number
-    steps = 2
+    steps = 300
 
-    # compute initial tumor diameter, knowing that the final correspond to 600 um
-    td_f = sim_parameters.get_value("max_tumor_diameter")  # correspond to 600 um
+    # compute initial tumor diameter fraction, knowing that the final correspond to 1
     tgr = sim_parameters.get_value("tgr")
-    td_i = td_f / (tgr ** (steps / 3))
-    sim_parameters.set_value("min_tumor_diameter", td_i)  # correspond to d_0
+    tdf_i = tgr ** (-steps)
+    sim_parameters.set_value("tdf_i", tdf_i)
 
     sim_parameters.set_value("V_uc_af", 21.1608695473508)  # values given in [1 / tau]
 
@@ -237,86 +243,21 @@ def reproduce_results():
                    sim_parameters=sim_parameters,
                    patient_parameters=patient0_parameters,
                    steps=steps,
-                   save_rate=10,
+                   save_rate=300,
                    out_folder_name="Fig4d",
                    sim_rationale=f"Reproducing simulation in Fig4d",
                    slurm_job_id=slurm_job_id)
 
 
 def test():
-    # ---------------------------------------------------------------------------------------------------------------- #
-    # PREAMBLE
-    # Below, we generate the simulation parameters form the notebook, and we get the slurm job ID, if any.
-    # ---------------------------------------------------------------------------------------------------------------- #
-
-    # execute the notebook
-    parameters_nb = "notebooks/parameters.ipynb"
-    if rank == 0:
-        subprocess.run(["jupyter", "nbconvert", "--to", "html", "--execute", parameters_nb])
-
-    # load parameters as generated from the notebook
-    parameters_csv = "notebooks/out/g_parameters.csv"
-    standard_parameters_df = pd.read_csv(parameters_csv, index_col="name")
-
-    # get slurm job id, if any
-    if "-slurm_job_id" in sys.argv:
-        try:
-            slurm_job_id = int(sys.argv[sys.argv.index("-slurm_job_id") + 1])
-        except IndexError:
-            raise IndexError("slurm_job_id not specified. Found -slurm_job_id not followed by an actual id.")
-    else:
-        slurm_job_id = None
-
-    # wait for all processes
-    comm_world.Barrier()
-
-    # ---------------------------------------------------------------------------------------------------------------- #
-    # RUN SIMULATION
-    # ---------------------------------------------------------------------------------------------------------------- #
-
-    # load parameters
-    sim_parameters = Parameters(standard_parameters_df)
-
-    # load patients parameters for p0
-    with open("input_patients_data/patients_parameters.json", "r") as infile:
-        patients_parameters = json.load(infile)
-    patient0_parameters = patients_parameters["patient0"]
-
-    steps = 2
-
-    # run simulation
-    run_simulation(spatial_dimension=3,
-                   sim_parameters=sim_parameters,
-                   patient_parameters=patient0_parameters,
-                   steps=steps,
-                   save_rate=10,
-                   out_folder_name="Test",
-                   sim_rationale=f"Test",
-                   slurm_job_id=slurm_job_id,
-                   recompute_mesh=True,
-                   recompute_c0=True)
-
-    # resume simulation
-    resume_simulation(resume_from="saved_sim/Test",
-                      steps=steps,
-                      save_rate=1,
-                      out_folder_name="Test_resume",
-                      sim_rationale="test",
-                      slurm_job_id=slurm_job_id)
-
-    # test tip cell activation
-    test_tip_cell_activation(spatial_dimension=3,
-                             standard_sim_parameters=sim_parameters,
-                             patient_parameters=patient0_parameters,
-                             out_folder_name="test_activation",
-                             slurm_job_id=slurm_job_id,
-                             V_uc_af=[21.1608695473508])
-
-
+    pass
 
 
 def main():
-    test()
+    for sim_folder in Path("saved_sim").glob("patient*_tip-cell-activation"):
+        tip_cells_csv = sim_folder / Path("tipcell_activation.csv")
+        plot_activation_tiles(str(tip_cells_csv),
+                              save_to=Path(f"visualization/python/out/{sim_folder.name}.png"))
 
 
 if __name__ == "__main__":

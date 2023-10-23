@@ -37,6 +37,35 @@ rank = comm_world.Get_rank()
 logger = logging.getLogger(__name__)
 
 
+def get_ureg_with_arbitrary_units(sim_parameters: Parameters):
+    """
+            Generate a UnitRegistry with the arbitrary units as defined in the Simulation Parameters
+            """
+    # initialize unit registry
+    local_ureg = UnitRegistry()
+
+    # get parameters dataframe
+    parameters_df = sim_parameters.as_dataframe()
+
+    # set name of arbitrary units as defined in the parameters
+    sau_name = "Space Arbitrary Unit"
+    tau_name = "Time Arbitrary Unit"
+    afau_name = "AFs Arbitrary Unit"
+
+    # define sau, tau and afau according to dataframe
+    local_ureg.define(f"{sau_name} = "
+                      f"{parameters_df.loc[sau_name, 'real_value']} * {parameters_df.loc[sau_name, 'real_um']} = "
+                      f"sau")
+    local_ureg.define(f"{tau_name} = "
+                      f"{parameters_df.loc[tau_name, 'real_value']} * {parameters_df.loc[tau_name, 'real_um']} = "
+                      f"tau")
+    local_ureg.define(f"af concentration arbitrary unit = "
+                      f"{parameters_df.loc[afau_name, 'real_value']} * {parameters_df.loc[afau_name, 'real_um']} = "
+                      f"afau")
+
+    return local_ureg
+
+
 class GradientEvaluator:
     """
     Class to efficiently compute the af gradient. Defined to avoid the use of ``fenics.project(grad(af), V)``.
@@ -133,7 +162,7 @@ class RHSimulation:
         # proprieties
         self.spatial_dimension: int = spatial_dimension  # spatial dimension
         self.init_time: float = time.perf_counter()  # initial simulation time
-        self.ureg: UnitRegistry = self._get_ureg()  # unit registry
+        self.ureg: UnitRegistry = get_ureg_with_arbitrary_units(sim_parameters)  # unit registry
         self.sim_rationale: str = sim_rationale  # sim description
         self.slurm_job_id: int = slurm_job_id  # slurm job id (if available)
         self.error_msg = None  # error message in case of simulation errors
@@ -172,34 +201,6 @@ class RHSimulation:
         if activate_logger:
             confgure_root_logger_with_standard_settings(self.data_folder)
 
-    def _get_ureg(self) -> UnitRegistry:
-        """
-        Generate a UnitRegistry with the arbitrary units as defined in the Simulation Parameters
-        """
-        # initialize unit registry
-        local_ureg = UnitRegistry()
-
-        # get parameters dataframe
-        parameters_df = self.sim_parameters.as_dataframe()
-
-        # set name of arbitrary units as defined in the parameters
-        sau_name = "Space Arbitrary Unit"
-        tau_name = "Time Arbitrary Unit"
-        afau_name = "AFs Arbitrary Unit"
-
-        # define sau, tau and afau according to dataframe
-        local_ureg.define(f"{sau_name} = "
-                          f"{parameters_df.loc[sau_name, 'real_value']} * {parameters_df.loc[sau_name, 'real_um']} = "
-                          f"sau")
-        local_ureg.define(f"{tau_name} = "
-                          f"{parameters_df.loc[tau_name, 'real_value']} * {parameters_df.loc[tau_name, 'real_um']} = "
-                          f"tau")
-        local_ureg.define(f"af concentration arbitrary unit = "
-                          f"{parameters_df.loc[afau_name, 'real_value']} * {parameters_df.loc[afau_name, 'real_um']} = "
-                          f"afau")
-
-        return local_ureg
-
     def _check_simulation_properties(self):
         # check spatial dimension
         assert (self.spatial_dimension == 2 or self.spatial_dimension == 3), \
@@ -226,7 +227,10 @@ class RHSimulation:
                                 "sif",
                                 "visualization",
                                 "*pycache*",
-                                ".thumbs"]
+                                ".thumbs",
+                                ".sim_cache/*",
+                                "jobids.txt",
+                                "slurm/*"]
 
             # if reproduce folder exists, remove it
             if self.reproduce_folder.exists():
