@@ -937,11 +937,7 @@ class RHTestTipCellActivation(RHSimulation):
         # if kwargs is not empty, set it as param dictionary (user directly inputs parameters to test)
         # else, use a set of default conditions to test
         if kwargs:
-            if all([isinstance(v, List) for v in kwargs.values()]):
                 params_dictionary = kwargs
-            else:
-                raise TypeError("Every parameter must be associated with a list (e.g. D_af=[1, 2, 3]).")
-
         else:
             # else create default params dictionary
             tdf_i_range = np.linspace(start=0.2, stop=1.0, num=5, endpoint=True)
