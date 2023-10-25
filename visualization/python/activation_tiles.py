@@ -41,11 +41,11 @@ def plot_activation_tiles(tip_cell_activation_csv: str, save_to: Path):
     # Convert each column to correct units
     # 1. tdf_i (converted to actual tumor volume)
     tdf_i_col_name, = [col_name for col_name in indata.columns if "tdf_i" in col_name]
-    patient_tumor_lateral_ax = (patient_parameters["tumor_lateral_ax"]["value"] *
-                                ureg(patient_parameters["tumor_lateral_ax"]["mu"]))
-    patient_tumor_axial_ax = (patient_parameters["tumor_axial_ax"]["value"] *
-                              ureg(patient_parameters["tumor_axial_ax"]["mu"]))
-    patient_tumor_volume = (4 / 3) * np.pi * patient_tumor_axial_ax * (patient_tumor_lateral_ax ** 2)
+    patient_tumor_lateral_semiax = ((patient_parameters["tumor_lateral_ax"]["value"] / 2) *
+                                    ureg(patient_parameters["tumor_lateral_ax"]["mu"]))
+    patient_tumor_axial_semiax = ((patient_parameters["tumor_axial_ax"]["value"] / 2) *
+                                  ureg(patient_parameters["tumor_axial_ax"]["mu"]))
+    patient_tumor_volume = (4 / 3) * np.pi * patient_tumor_axial_semiax * (patient_tumor_lateral_semiax ** 2)
     patient_tumor_volume_mu = "mm ** 3"
     patient_tumor_volume = patient_tumor_volume.to(patient_tumor_volume_mu)
     indata[tdf_i_col_name] = indata[tdf_i_col_name].map(lambda tdf: (tdf * patient_tumor_volume).magnitude)
