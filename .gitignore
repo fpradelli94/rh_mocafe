@@ -7,3 +7,6 @@ __pycache__
 /.idea/
 /input_patients_data/old/
 /misc/
+/.venv
+Pipfile*
+visualization/python/out/
