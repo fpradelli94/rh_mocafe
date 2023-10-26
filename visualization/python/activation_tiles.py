@@ -156,3 +156,96 @@ def plot_activation_tiles(tip_cell_activation_csv: str, save_to: Path):
 
     fig.subplots_adjust(top=0.95, right=0.85, left=0.17)
     plt.savefig(save_to)
+
+
+def plot_activation_tiles2(tip_cell_activation_csv: str, save_to: str):
+    # load data
+    tip_cell_activation_csv_path = Path(tip_cell_activation_csv)
+    indata = pd.read_csv(tip_cell_activation_csv)
+
+    # load parameters
+    sim_parameters = pd.read_csv(tip_cell_activation_csv_path.parent / Path("sim_info/sim_parameters.csv"),
+                                 index_col="name")
+    with open(tip_cell_activation_csv_path.parent / Path("sim_info/patient_parameters.json"), "r") as infile:
+        patient_parameters = json.load(infile)
+
+    # load arbitrary units
+    ureg = get_ureg_with_arbitrary_units(Parameters(sim_parameters))
+
+    # Convert each column to correct units
+    # 1. V_pT_af
+    V_pT_af_col_name, = [col_name for col_name in indata.columns if "V_pT" in col_name]
+    V_pt_af_unit = "pg /(mL * s)"
+    indata[V_pT_af_col_name] = indata[V_pT_af_col_name].map(
+        lambda V_pt_af: (V_pt_af * ureg("afau / tau")).to(V_pt_af_unit).magnitude
+    )
+    # 2. V_uc_af
+    V_uc_af_col_name, = [col_name for col_name in indata.columns if "V_uc" in col_name]
+    V_uc_af_unit = "1 / s"
+    indata[V_uc_af_col_name] = indata[V_uc_af_col_name].map(
+        lambda V_uc_af: (V_uc_af * ureg("1 / tau")).to(V_uc_af_unit).magnitude
+    )
+
+    # Get labels for plot
+    # 1. V_pT_af
+    V_pT_af_values = indata[V_pT_af_col_name].unique()
+    n_V_pT_af_values = len(V_pT_af_values)
+    # get labels from V_pT_af_values
+    V_pT_af_labels = [f"{V_pT_af:.2e}" for V_pT_af in V_pT_af_values]
+    # 2. V_uc_af
+    V_uc_af_values = indata[V_uc_af_col_name].unique()
+    n_V_uc_af_values = len(V_uc_af_values)
+    # get labels from V_uc_af
+    V_uc_af_labels = [f"{V_uc_af:.2e}" for V_uc_af in V_uc_af_values]
+
+    # create subplot (rows = T_c values, cols = diameter)
+    n_grid_rows = 1
+    n_grid_cols = 1
+    fig, ax = plt.subplots(nrows=n_grid_rows, ncols=n_grid_cols, figsize=(12, 8))
+
+    # create discrete colormap (snow = False; royalblue = True)
+    cmap = colors.ListedColormap(['snow', 'royalblue'])
+
+    # init boolean matrix
+    tca_matrix = np.full((n_V_uc_af_values, n_V_pT_af_values), True)
+    # check tip_cell_state
+    for i, V_uc_af in enumerate(V_uc_af_values[::-1]):
+        for j, V_pT_af in enumerate(V_pT_af_values):
+            # get subset of indata
+            subset = indata[np.isclose(indata[V_uc_af_col_name], V_uc_af) &
+                            np.isclose(indata[V_pT_af_col_name], V_pT_af)]
+            # check if tip cell is activated
+            tca_matrix[i][j] = subset["tip_cell_activated"].values[0]
+
+    # set labels
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    ax.set_ylabel(fr"$V_{{uc}} [{V_uc_af_unit}]$")
+    ax.set_yticks(np.arange(n_V_uc_af_values))
+    ax.set_yticklabels(V_uc_af_labels[::-1])
+
+    ax.set_xlabel(fr"$V_{{pT}}$ [{V_pt_af_unit}]")
+    ax.set_xticks(np.arange(n_V_pT_af_values))
+    ax.set_xticklabels(V_pT_af_labels)
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right",
+             rotation_mode="anchor")
+
+    # set grid
+    ax.set_xticks(np.arange(-0.5, n_V_pT_af_values, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, n_V_uc_af_values, 1), minor=True)
+    ax.grid(which="minor", color="k", linestyle='-', linewidth=1)
+    ax.tick_params(which="minor", bottom=False, left=False)
+
+    # set imshow
+    im = ax.imshow(tca_matrix, cmap=cmap, vmin=0, vmax=1)
+
+    # set colorbax
+    cbar = fig.colorbar(im, ax=ax, shrink=0.5)
+    cax = cbar.ax  # get axis
+    cax.get_yaxis().set_ticks([0.25, 0.75])  # place two middle ticks
+    cax.get_yaxis().set_ticklabels(["No Angiogenesis", "Angiogenesis"], rotation=90, va="center")
+    cax.set_position([0.9, 0.25, 0.1, 0.5])
+
+    fig.subplots_adjust(top=0.95, right=0.85, left=0.17)
+    plt.savefig(save_to)
