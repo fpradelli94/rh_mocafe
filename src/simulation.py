@@ -717,6 +717,8 @@ class RHTimeSimulation(RHSimulation):
         # mv distributed files to data folder
         if self.save_distributed_files:
             move_files_once_per_node(src_folder=self.distributed_data_folder, dst=self.pvd_folder)
+            rmtree_if_exists_once_per_node(self.distributed_data_folder)
+
 
         super()._end_simulation()
 
@@ -1028,6 +1030,7 @@ def run_simulation(spatial_dimension: int,
     :param recompute_mesh: recompute the mesh for the simulation
     :param recompute_c0: recompute c0 for the simulation. If False, the most recent c0 is used. Default is False.
     :param write_checkpoints: set to True to save simulation with checkpoints
+    :param save_distributed_files_to: set where the distributed files should be saved on the local node file system.
     """
     # ---------------------------------------------------------------------------------------------------------------- #
     #                                                 Init Simulation
