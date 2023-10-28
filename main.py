@@ -5,11 +5,10 @@ import socket
 import subprocess
 import fenics
 import pandas as pd
-from pathlib import Path
 from mocafe.fenut.parameters import Parameters
 from src.simulation import run_simulation, resume_simulation, test_tip_cell_activation
-from src.experiments import check_tip_cell_activation_for_each_patient
-from visualization.python.activation_tiles import plot_activation_tiles
+import src.experiments
+import visualization.python.activation_tiles
 
 
 # get process rank
@@ -24,8 +23,9 @@ logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 ch = logging.StreamHandler(stream=sys.stdout)
 ch.setLevel(logging.DEBUG)
-formatter = logging.Formatter(f"%(asctime)s (%(created)f) | host={socket.gethostname()}:p{rank} "
-                              f"| %(name)s:%(funcName)s:%(levelname)s: %(message)s")
+formatter = logging.Formatter(f"%(asctime)s (%(created)f) | "
+                              f"host={socket.gethostname().ljust(8, ' ')}:p{str(rank).zfill(2)} | "
+                              f"%(name)s:%(funcName)s:%(levelname)s: %(message)s")
 ch.setFormatter(formatter)
 logger.addHandler(ch)
 
@@ -254,10 +254,8 @@ def test():
 
 
 def main():
-    for sim_folder in Path("saved_sim").glob("patient*_tip-cell-activation"):
-        tip_cells_csv = sim_folder / Path("tipcell_activation.csv")
-        plot_activation_tiles(str(tip_cells_csv),
-                              save_to=Path(f"visualization/python/out/{sim_folder.name}.png"))
+    # patient1_vascular_sprouting()
+    src.experiments.test_different_tipe_steps_patient1()
 
 
 if __name__ == "__main__":

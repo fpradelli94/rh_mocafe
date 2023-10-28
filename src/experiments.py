@@ -4,7 +4,7 @@ import logging
 import pandas as pd
 import numpy as np
 from mocafe.fenut.parameters import Parameters
-from src.simulation import run_simulation, test_tip_cell_activation
+from src.simulation import run_simulation, test_tip_cell_activation, RHTimeAdaptiveSimulation
 
 
 # set up logger
@@ -158,8 +158,8 @@ def patient1_vascular_sprouting():
 
     for tdf_i, V_uc_af, n_steps in zip(tdf_i_range, V_uc_af_range, n_steps_range):
         # set parameters value
-        sim_parameters.set_value("tdf_i", 0.94)
-        sim_parameters.set_value("V_uc_af", 2.32)
+        sim_parameters.set_value("tdf_i", tdf_i)
+        sim_parameters.set_value("V_uc_af", V_uc_af)
 
         # run simulation
         run_simulation(spatial_dimension=3,
@@ -261,3 +261,69 @@ def tip_cell_activation_V_pT_and_V_uc_ranges_for_each_patient():
                                  tdf_i=[min_tdf_i[patient]],
                                  V_pT_af=V_pT_af_range,
                                  V_uc_af=V_uc_af_range)
+
+
+def test_adaptive_vascular_sprouting_for_patient1():
+    # preamble
+    sim_parameters, slurm_job_id, patients_parameters = preamble()
+
+    # get sim parameters dataframe
+    sim_parameters_df = sim_parameters.as_dataframe()
+
+    # set parameters value leading to sprouting in patient1
+    tdf_i = 0.94  # tdf values for tip cell activation in patient1
+    sim_parameters.set_value("tdf_i", tdf_i)
+    V_uc_af = 2.32  # V_uc_af values for tip cell activation in patient1
+    sim_parameters.set_value("V_uc_af", V_uc_af)
+    V_pT_af_max = float(sim_parameters_df.loc["V_pT_af", "sim_range_max"])
+    sim_parameters.set_value("V_pT_af", V_pT_af_max)
+
+    # get number of step to reach the volume observed in patient1
+    n_steps = 150
+
+    # set sim rationale
+    sim_rationale = "Testing adaptive solver"
+
+    # set adaptive_simulation
+    simulation = RHTimeAdaptiveSimulation(spatial_dimension=3,
+                                          sim_parameters=sim_parameters,
+                                          patient_parameters=patients_parameters["patient1"],
+                                          steps=n_steps,
+                                          delta_steps=5,
+                                          trigger_adaptive_tc_activation_after_steps=3,
+                                          save_rate=10,
+                                          out_folder_name="patient1_test-vascular-sprouting-adaptive",
+                                          out_folder_mode="datetime",
+                                          sim_rationale=sim_rationale + " | ADAPTIVE",
+                                          slurm_job_id=slurm_job_id,
+                                          load_from_cache=False,
+                                          write_checkpoints=False,
+                                          save_distributed_files_to="/local/frapra/3drh")
+    simulation.run()
+
+
+def test_different_tipe_steps_patient1():
+    sim_parameters, slurm_job_id, patients_parameters = preamble()
+
+    dt_range = [100, 50, 25, 10, 5, 2, 1]
+    n_steps_range = [int(200 / dt) for dt in dt_range]
+
+    for dt, n_steps in zip(dt_range, n_steps_range):
+        sim_parameters.set_value("dt", dt)
+        sim_parameters.set_value("T_c", 100)  # prevent tc activation
+        
+        sim_rationale = f"Testing simulation for dt: {dt}"
+
+        run_simulation(spatial_dimension=3,
+                       sim_parameters=sim_parameters,
+                       patient_parameters=patients_parameters["patient1"],
+                       steps=n_steps,
+                       save_rate=50,
+                       out_folder_name="patient1_test-dt",
+                       out_folder_mode="datetime",
+                       sim_rationale=sim_rationale,
+                       slurm_job_id=slurm_job_id,
+                       recompute_mesh=True,
+                       recompute_c0=True,
+                       write_checkpoints=False,
+                       save_distributed_files_to="/local/frapra/3drh")

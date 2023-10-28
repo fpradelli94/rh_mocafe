@@ -3,6 +3,7 @@ Contains methods and classes to run and resume simulations in 2D and 3D
 """
 import fenics
 import time
+import json
 import logging
 from pathlib import Path
 import sys
@@ -20,7 +21,6 @@ import mocafe.angie.forms
 from mocafe.fenut.parameters import Parameters
 from mocafe.angie.tipcells import TipCellManager, load_tip_cells_from_json
 from mocafe.fenut.solvers import PETScProblem, PETScNewtonSolver
-from mocafe.fenut.log import confgure_root_logger_with_standard_settings
 import src.forms
 from src.ioutils import (read_parameters, write_parameters, dump_json, load_json, move_files_once_per_node,
                          rmtree_if_exists_once_per_node)
@@ -129,7 +129,6 @@ class RHSimulation:
                  out_folder_mode: str = None,
                  sim_rationale: str = "No comment",
                  slurm_job_id: int = None,
-                 activate_logger: bool = False,
                  load_from_cache: bool = False,
                  write_checkpoints: bool = True):
         """
@@ -148,7 +147,6 @@ class RHSimulation:
         is "No comment".
         :param slurm_job_id: slurm job ID assigned to the simulation, if performed with slurm. It is used to generate a
         pbar stored in ``slurm/<slurm job ID>.pbar``.
-        :param activate_logger: activate the standard logger to save detailed information on the simulation activity.
         :param load_from_cache: load mesh and some function from the cache. Default is False.
         """
         # parameters
@@ -196,10 +194,6 @@ class RHSimulation:
             self.pbar_file = open(f"slurm/{self.slurm_job_id}pbar.o", 'w')
         else:
             self.pbar_file = sys.stdout
-
-        # setup Mocafe Logger
-        if activate_logger:
-            confgure_root_logger_with_standard_settings(self.data_folder)
 
     def _check_simulation_properties(self):
         # check spatial dimension
@@ -405,7 +399,6 @@ class RHTimeSimulation(RHSimulation):
                  out_folder_mode: str = None,
                  sim_rationale: str = "No comment",
                  slurm_job_id: int = None,
-                 activate_logger: bool = False,
                  load_from_cache: bool = False,
                  write_checkpoints: bool = True,
                  save_distributed_files_to: str or None = None):
@@ -428,7 +421,6 @@ class RHTimeSimulation(RHSimulation):
         is "No comment".
         :param slurm_job_id: slurm job ID assigned to the simulation, if performed with slurm. It is used to generate a
         pbar stored in ``slurm/<slurm job ID>.pbar``.
-        :param activate_logger: activate the standard logger to save detailed information on the simulation activity.
         :param load_from_cache: load mesh and some function from the cache. Default is False.
         """
         # init super class
@@ -439,7 +431,6 @@ class RHTimeSimulation(RHSimulation):
                          out_folder_mode=out_folder_mode,
                          sim_rationale=sim_rationale,
                          slurm_job_id=slurm_job_id,
-                         activate_logger=activate_logger,
                          load_from_cache=load_from_cache,
                          write_checkpoints=write_checkpoints)
 
@@ -502,7 +493,10 @@ class RHTimeSimulation(RHSimulation):
             self._generate_initial_conditions()  # generate initial condition
 
         # write initial conditions
-        self.__write_files(0)
+        self._write_files(0)
+
+        # define solver before time iteration
+        self.solver = PETScNewtonSolver(self.lsp, self.mesh.mpi_comm())
 
         self._time_iteration()  # run simulation in time
 
@@ -606,7 +600,7 @@ class RHTimeSimulation(RHSimulation):
         # definie initial time
         self.t0 = last_step
 
-    def __write_files(self, t: int):
+    def _write_files(self, t: int):
         # write files
         if self.save_distributed_files:
             logger.info(f"Starting writing of PVD files ")
@@ -634,28 +628,35 @@ class RHTimeSimulation(RHSimulation):
             logger.info(f"Writing tipcells_xdmf... ")
             self.tipcells_xdmf.write(self.t_c_f_function, t)
 
-    def _time_iteration(self):
-        logger.info(f"{self.out_folder_name}:Defining weak form...")
+    def _solve(self, problem: PETScProblem, u: fenics.Function):
+        try:
+            self.solver.solve(problem, u.vector())
+        except RuntimeError as e:
+            # store error info
+            self.runtime_error_occurred = True
+            self.error_msg = str(e)
+            logger.error(str(e))
 
-        # define variable functions
+    def _time_iteration(self):
+        # define weak form
+        logger.info(f"{self.out_folder_name}:Defining weak form...")
         u = fenics.Function(self.V)
+        # assign functions to u
         fenics.assign(u, [self.af_old, self.c_old, self.mu_old])
         af, c, mu = fenics.split(u)
         # define test functions
         v1, v2, v3 = fenics.TestFunctions(self.V)
         # build total form
-        af_form = src.forms.angiogenic_factors_form_eq(af, self.phi, c, v1, self.sim_parameters)
-        capillaries_form = mocafe.angie.forms.angiogenesis_form_no_proliferation(c, self.c_old, mu, self.mu_old, v2, v3,
-                                                                                 self.sim_parameters)
+        af_form = src.forms.angiogenic_factors_form_dt(af, self.af_old, self.phi, c, v1, self.sim_parameters)
+        capillaries_form = mocafe.angie.forms.angiogenesis_form_no_proliferation(
+            c, self.c_old, mu, self.mu_old, v2, v3, self.sim_parameters)
         form = af_form + capillaries_form
 
+        # define problem
         logger.info(f"{self.out_folder_name}:Defining problem...")
-
         # define Jacobian
         J = fenics.derivative(form, u)
-        # define problem
         problem = PETScProblem(J, form, [])
-        solver = PETScNewtonSolver(self.lsp, self.mesh.mpi_comm())
 
         # init time iteration
         t = self.t0
@@ -684,14 +685,10 @@ class RHTimeSimulation(RHSimulation):
             self.tip_cell_manager.save_incremental_tip_cells(f"{self.report_folder}/incremental_tipcells.json", step)
 
             # solve
-            try:
-                solver.solve(problem, u.vector())
-            except RuntimeError as e:
-                # store error info
-                self.runtime_error_occurred = True
-                self.error_msg = str(e)
-                logger.error(str(e))
-                # stop simulation
+            self._solve(problem, u)
+
+            # if error occurred, stop iteration
+            if self.runtime_error_occurred:
                 break
 
             # assign to old
@@ -704,7 +701,7 @@ class RHTimeSimulation(RHSimulation):
 
             # save
             if (step % self.save_rate == 0) or (step == self.steps) or self.runtime_error_occurred:
-                self.__write_files(step)
+                self._write_files(step)
 
             # update progress bar
             self.pbar.update(1)
@@ -712,17 +709,16 @@ class RHTimeSimulation(RHSimulation):
     def _end_simulation(self):
         # save resume info
         if self.write_checkpoints:
-            self.__save_resume_info()
+            self._save_resume_info()
 
         # mv distributed files to data folder
         if self.save_distributed_files:
             move_files_once_per_node(src_folder=self.distributed_data_folder, dst=self.pvd_folder)
             rmtree_if_exists_once_per_node(self.distributed_data_folder)
 
-
         super()._end_simulation()
 
-    def __save_resume_info(self):
+    def _save_resume_info(self):
         """
         Save the mesh and/or the fenics Functions in a resumable format (i.e. using the FEniCS function
         `write_checkpoint`).
@@ -759,7 +755,6 @@ class RHTimeSimulation(RHSimulation):
                out_folder_mode: str = None,
                sim_rationale: str = "No comment",
                slurm_job_id: int = None,
-               activate_logger: bool = False,
                write_checkpoints: bool = True):
         """
         Resume a simulation stored in a given folder.
@@ -780,7 +775,6 @@ class RHTimeSimulation(RHSimulation):
         ``saved_sim/sim_name/sim_info/sim_info.html``. Default is "No comment".
         :param slurm_job_id: slurm job ID assigned to the simulation, if performed with slurm. It is used to generate a
         pbar stored in ``slurm/<slurm job ID>.pbar``.
-        :param activate_logger: activate the standard logger to save detailed information on the simulation activity.
         :param write_checkpoints: set to True to save simulation with checkpoints
         """
         # ----------------------------------------------------------------------------------------------------------- #
@@ -833,11 +827,278 @@ class RHTimeSimulation(RHSimulation):
                          out_folder_mode=out_folder_mode,
                          sim_rationale=sim_rationale,
                          slurm_job_id=slurm_job_id,
-                         activate_logger=activate_logger,
                          write_checkpoints=write_checkpoints)
         simulation.__resumed = True
         simulation.__resume_files_dict = resume_files_dict
         return simulation
+
+
+class RHTimeAdaptiveSimulation(RHTimeSimulation):
+    def __init__(self,
+                 spatial_dimension: int,
+                 sim_parameters: Parameters,
+                 patient_parameters: Dict,
+                 steps: int,
+                 delta_steps: int,
+                 trigger_adaptive_tc_activation_after_steps: int,
+                 save_rate: int = 1,
+                 out_folder_name: str = mansim.default_data_folder_name,
+                 out_folder_mode: str = None,
+                 sim_rationale: str = "No comment",
+                 slurm_job_id: int = None,
+                 load_from_cache: bool = False,
+                 write_checkpoints: bool = True,
+                 save_distributed_files_to: str or None = None):
+        super().__init__(spatial_dimension,
+                         sim_parameters,
+                         patient_parameters,
+                         steps,
+                         save_rate,
+                         out_folder_name,
+                         out_folder_mode,
+                         sim_rationale,
+                         slurm_job_id,
+                         load_from_cache,
+                         write_checkpoints,
+                         save_distributed_files_to)
+        # init time window
+        self.time_jump: float = sim_parameters.get_value("dt") * delta_steps
+        # set after how many steps the adaptive solver is activated
+        self.trigger_delta_step: int = trigger_adaptive_tc_activation_after_steps
+
+    def __build_weak_form(self, u: fenics.Function,
+                          phi_temp: fenics.Function or None = None,
+                          **weak_form_kwargs) -> fenics.Form:
+        # assign functions to u
+        # fenics.assign(u, [self.af_old, self.c_old, self.mu_old])
+        af, c, mu = fenics.split(u)
+        # define test functions
+        v1, v2, v3 = fenics.TestFunctions(self.V)
+        # build total form
+        if phi_temp is None:
+            af_form = src.forms.angiogenic_factors_form_dt(af, self.af_old, self.phi, c, v1, self.sim_parameters,
+                                                           **weak_form_kwargs)
+        else:
+            af_form = src.forms.angiogenic_factors_form_dt(af, self.af_old, phi_temp, c, v1, self.sim_parameters,
+                                                           **weak_form_kwargs)
+        capillaries_form = mocafe.angie.forms.angiogenesis_form_no_proliferation(
+            c, self.c_old, mu, self.mu_old, v2, v3, self.sim_parameters, **weak_form_kwargs
+        )
+        form = af_form + capillaries_form
+        # return form
+        return form
+
+    def _test_tip_cell_activation_after_delta_step(self,
+                                                   u_temp: fenics.Function,
+                                                   phi_temp: fenics.Function,
+                                                   phi_exp_temp: fenics.Expression,
+                                                   grad_af_temp: fenics.Function,
+                                                   t: float,
+                                                   time_jump: float):
+        # define bigger dt
+        bigger_dt = time_jump
+        # update tumor dimension
+        phi_exp_temp.t = t + time_jump
+        phi_temp.assign(fenics.interpolate(phi_exp_temp, self.V.sub(0).collapse()))
+        # build weak from for dt = time_jump * dt
+        form = self.__build_weak_form(u_temp, phi_temp=phi_temp, dt=bigger_dt)
+        # get Jacobian
+        J = fenics.derivative(form, u_temp)
+        # define problem
+        problem = PETScProblem(J, form, [])
+        # solve
+        self._solve(problem, u_temp)
+        # check if runtime error occurred
+        if self.runtime_error_occurred:
+            return False
+        # define functions
+        af_temp, c_temp, mu_temp = u_temp.split()
+        self.ge.compute_gradient(af_temp, self.vec_V, grad_af_temp, self.lsp)
+        # check tc_activation
+        tc_activate_after_delta_step = self.tip_cell_manager.test_tip_cell_activation(c_temp,
+                                                                                      af_temp,
+                                                                                      grad_af_temp)
+
+        return tc_activate_after_delta_step
+
+    def _find_next_activation_time(self, t: float,
+                                   putative_next_time: float,
+                                   u_temp: fenics.Function,
+                                   phi_temp: fenics.Function,
+                                   phi_exp_temp: fenics.Expression,
+                                   grad_af_temp: fenics.Function) -> float:
+        if abs(putative_next_time - t) <= self.sim_parameters.get_value("dt"):
+            logger.info(f"{self.out_folder_name}:Found next time: {putative_next_time}")
+            return putative_next_time
+        else:
+            # define mid step
+            mid_time = (putative_next_time + t) / 2
+            # define the delta between the current step and the actual step
+            delta_mid_time = mid_time - t
+
+            logger.info(f"{self.out_folder_name}:Checking tip cell activation at mid point: {mid_time}")
+            # solve problem after delta_mid_step
+            tc_activate_at_mid_step = self._test_tip_cell_activation_after_delta_step(u_temp, phi_temp, phi_exp_temp,
+                                                                                      grad_af_temp, t, delta_mid_time)
+            if tc_activate_at_mid_step:
+                return self._find_next_activation_time(t, mid_time, u_temp, phi_temp, phi_exp_temp, grad_af_temp)
+            else:
+                return self._find_next_activation_time(mid_time, putative_next_time, u_temp, phi_temp, phi_exp_temp,
+                                                       grad_af_temp)
+
+    def _time_iteration(self):
+        # define weak form
+        logger.info(f"{self.out_folder_name}:Defining weak form...")
+        u = fenics.Function(self.V)
+        form = self.__build_weak_form(u)
+
+        # define problem
+        logger.info(f"{self.out_folder_name}:Defining problem...")
+        # define Jacobian
+        J = fenics.derivative(form, u)
+        # define problem
+        problem = PETScProblem(J, form, [])
+
+        # init time iteration
+        dt = self.sim_parameters.get_value("dt")
+        self.t = dt
+        step = 1
+
+        # define temp phi exp
+        phi_exp_temp = get_growing_RH_expression(self.sim_parameters,
+                                                 self.patient_parameters,
+                                                 self.mesh_parameters,
+                                                 self.ureg,
+                                                 initial_t=self.t,
+                                                 spatial_dimension=3)
+
+        # init count of tip cells
+        tip_cell_count = np.zeros(self.steps)
+        # setup pbar
+        super()._set_pbar(total=self.steps)
+
+        # log
+        logger.info(f"{self.out_folder_name}:Starting time iteration...")
+        # iterate in time
+        while step < self.steps + 1:
+            if (step < 4) or (step > 100):
+                # activate tip cells
+                self.tip_cell_manager.activate_tip_cell(self.c_old, self.af_old, self.grad_af_old, step)
+
+                # revert tip cells
+                self.tip_cell_manager.revert_tip_cells(self.af_old, self.grad_af_old)
+
+                # move tip cells
+                self.tip_cell_manager.move_tip_cells(self.c_old, self.af_old, self.grad_af_old)
+
+                # store tip cells in fenics function and json file
+                self.t_c_f_function.assign(self.tip_cell_manager.get_latest_tip_cell_function())
+                self.tip_cell_manager.save_incremental_tip_cells(f"{self.report_folder}/incremental_tipcells.json", step)
+
+                # store tip cell count in array
+                current_tip_cell_count = len(self.tip_cell_manager.get_global_tip_cells_list())
+                tip_cell_count[step - 1] = current_tip_cell_count
+
+            if step > self.trigger_delta_step and \
+               np.all(tip_cell_count[step+1-self.trigger_delta_step:step+1] == 0):
+                logger.info(f"{self.out_folder_name}:Entered adaptive time iteration")
+
+                # 1. Proceed solving the problem after the time_jump
+                putative_next_time = self.t + self.time_jump             # init putative next time
+                u_temp = fenics.Function(self.V)                         # init u_temp
+                grad_af_temp = fenics.Function(self.vec_V)               # init grad_af_temp
+                phi_temp = fenics.Function(self.V.sub(0).collapse())     # init phi_temp
+                phi_exp_temp = get_growing_RH_expression(self.sim_parameters,
+                                                         self.patient_parameters,
+                                                         self.mesh_parameters,
+                                                         self.ureg,
+                                                         initial_t=self.t,
+                                                         spatial_dimension=3)
+                # 2. Check if tc activate after time_jump
+                logger.info(f"{self.out_folder_name}:Checking tip cell activation after time jump "
+                            f"(sim time: {self.t})")
+
+                tc_activate_at_putative_next_time = self._test_tip_cell_activation_after_delta_step(
+                    u_temp, phi_temp, phi_exp_temp, grad_af_temp, step, self.time_jump
+                )
+                logger.info(f"{self.out_folder_name}:Checking tip cell activation after time jump: "
+                            f"(sim time: {self.t}): {tc_activate_at_putative_next_time}")
+                # if runtime error occurred, exit
+                if self.runtime_error_occurred:
+                    return 1
+
+                # 3. If tc activated at next step, find the actual next step. Else, set the putative next step as
+                # the next step
+                if tc_activate_at_putative_next_time:
+                    next_time = self._find_next_activation_time(self.t, putative_next_time, u_temp, phi_temp,
+                                                                phi_exp_temp, grad_af_temp)
+                else:
+                    next_time = putative_next_time
+                # if runtime error occurred, exit
+                if self.runtime_error_occurred:
+                    return 1
+
+                # 4. Update status
+                logger.info(f"{self.out_folder_name}:Updating simulation status after adaptive time stepping")
+                # compute delta in terms of steps
+                delta_step = int(np.round(next_time - self.t))
+                # update time
+                self.t = next_time
+                # update phi
+                self.phi.assign(phi_temp)
+                # update all functions
+                fenics.assign([self.af_old, self.c_old, self.mu_old], u_temp)
+                fenics.assign(u, [self.af_old, self.c_old, self.mu_old])
+                fenics.assign(self.grad_af_old, grad_af_temp)
+                # update pbar
+                self.pbar.update(delta_step)
+                # Update sim step
+                step += delta_step
+                # write functions
+                if ((step % self.save_rate == 0)
+                        or (step == self.steps)
+                        or self.runtime_error_occurred
+                        or tc_activate_at_putative_next_time):
+                    self._write_files(step)
+
+                # 5. update tip cells incremental file
+                with open(f"{self.report_folder}/incremental_tipcells.json", "r+") as itc_json:
+                    itc_dict = json.load(itc_json)
+                    last_saved_step = list(itc_dict.keys())[-1]
+                    last_saved_step = int(last_saved_step.replace("step_", ""))
+                    for missing_step in range(last_saved_step, step):
+                        itc_dict[f"step_{missing_step}"] = {}
+                    json.dump(itc_dict, itc_json)
+
+                logger.info(f"{self.out_folder_name}:Exiting adaptive time stepping")
+            else:
+                # solve
+                self._solve(problem, u)
+
+                # if error occurred, stop iteration
+                if self.runtime_error_occurred:
+                    return 1
+
+                # assign to old
+                fenics.assign([self.af_old, self.c_old, self.mu_old], u)
+                # assign new value to grad_af_old
+                self.ge.compute_gradient(self.af_old, self.vec_V, self.grad_af_old, self.lsp)
+                # assign new value to phi
+                self.phi_expression.t = self.t  # update time
+                self.phi.assign(fenics.interpolate(self.phi_expression, self.V.sub(0).collapse()))
+
+                # save
+                if (step % self.save_rate == 0) or (step == self.steps) or self.runtime_error_occurred:
+                    self._write_files(step)
+
+                # update progress bar
+                self.pbar.update(1)
+
+                # update time
+                self.t += dt
+                step += 1
+
+        return 0
 
 
 class RHTestTipCellActivation(RHSimulation):
@@ -849,7 +1110,6 @@ class RHTestTipCellActivation(RHSimulation):
                  out_folder_mode: str = None,
                  sim_rationale: str = "No comment",
                  slurm_job_id: int = None,
-                 activate_logger: bool = False,
                  load_from_cache: bool = False,
                  write_checkpoints: bool = True):
         # init super class
@@ -860,7 +1120,6 @@ class RHTestTipCellActivation(RHSimulation):
                          out_folder_mode=out_folder_mode,
                          sim_rationale=sim_rationale,
                          slurm_job_id=slurm_job_id,
-                         activate_logger=activate_logger,
                          load_from_cache=load_from_cache,
                          write_checkpoints=write_checkpoints)
 
@@ -939,7 +1198,7 @@ class RHTestTipCellActivation(RHSimulation):
         # if kwargs is not empty, set it as param dictionary (user directly inputs parameters to test)
         # else, use a set of default conditions to test
         if kwargs:
-                params_dictionary = kwargs
+            params_dictionary = kwargs
         else:
             # else create default params dictionary
             tdf_i_range = np.linspace(start=0.2, stop=1.0, num=5, endpoint=True)
@@ -999,7 +1258,6 @@ def run_simulation(spatial_dimension: int,
                    out_folder_mode: str = None,
                    sim_rationale: str = "No comment",
                    slurm_job_id: int = None,
-                   activate_logger: bool = False,
                    recompute_mesh: bool = False,
                    recompute_c0: bool = False,
                    write_checkpoints: bool = True,
@@ -1026,7 +1284,6 @@ def run_simulation(spatial_dimension: int,
     stored in ``slurm/<slurm job ID>.pbar``.
     to choose between two similar versions of the vessel images (see ``notebooks/vessels_image_processing.ipynb``). No
     difference in the simulations results was found using one image or another.
-    :param activate_logger: activate the standard logger to save detailed information on the simulation activity.
     :param recompute_mesh: recompute the mesh for the simulation
     :param recompute_c0: recompute c0 for the simulation. If False, the most recent c0 is used. Default is False.
     :param write_checkpoints: set to True to save simulation with checkpoints
@@ -1047,7 +1304,6 @@ def run_simulation(spatial_dimension: int,
         out_folder_mode=out_folder_mode,
         sim_rationale=sim_rationale,
         slurm_job_id=slurm_job_id,
-        activate_logger=activate_logger,
         load_from_cache=(not recompute_mesh) or (not recompute_c0),
         write_checkpoints=write_checkpoints,
         save_distributed_files_to=save_distributed_files_to
@@ -1065,7 +1321,6 @@ def resume_simulation(resume_from: str,
                       out_folder_mode: str = None,
                       sim_rationale: str = "No comment",
                       slurm_job_id: int = None,
-                      activate_logger: bool = False,
                       write_checkpoints: bool = True):
     """
     Resume a simulation stored in a given folder.
@@ -1086,7 +1341,6 @@ def resume_simulation(resume_from: str,
     "No comment".
     :param slurm_job_id: slurm job ID assigned to the simulation, if performed with slurm. It is used to generate a pbar
     stored in ``slurm/<slurm job ID>.pbar``.
-    :param activate_logger: activate the standard logger to save detailed information on the simulation activity.
     :param write_checkpoints: set to True to save simulation with checkpoints
     """
     simulation = RHTimeSimulation.resume(resume_from=Path(resume_from),
@@ -1096,7 +1350,6 @@ def resume_simulation(resume_from: str,
                                          out_folder_mode=out_folder_mode,
                                          sim_rationale=sim_rationale,
                                          slurm_job_id=slurm_job_id,
-                                         activate_logger=activate_logger,
                                          write_checkpoints=write_checkpoints)
     # run simulation
     simulation.run()
@@ -1111,7 +1364,6 @@ def test_tip_cell_activation(spatial_dimension: int,
                              out_folder_mode: str = None,
                              sim_rationale: str = "No comment",
                              slurm_job_id: int = None,
-                             activate_logger=False,
                              results_df: str = None,
                              recompute_mesh: bool = False,
                              recompute_c0: bool = False,
@@ -1124,7 +1376,6 @@ def test_tip_cell_activation(spatial_dimension: int,
                                          out_folder_mode=out_folder_mode,
                                          sim_rationale=sim_rationale,
                                          slurm_job_id=slurm_job_id,
-                                         activate_logger=activate_logger,
                                          load_from_cache=(not recompute_mesh) or (not recompute_c0),
                                          write_checkpoints=write_checkpoints)
 
