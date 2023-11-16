@@ -1,4 +1,3 @@
-import json
 import numpy as np
 from pathlib import Path
 from skimage import io, measure, morphology, feature
@@ -58,7 +57,7 @@ def generate_edges_and_skeleton_for_pic2d(pic2d: Path):
     # get edges as the esternal border of the original binary
     edges = np.zeros(pic2d_arr.shape).astype(bool)
     morphology.binary_dilation(pic2d_arr, out=edges)
-    edges[pic2d_arr == True] = False
+    edges[pic2d_arr] = False
     io.imsave(pic2d.parent / Path(f"{patient}_pic2d_edges.png"), edges)
 
 
@@ -84,6 +83,3 @@ if __name__ == "__main__":
         axs[i].imshow(np.load(pic2d))
 
     plt.show()
-
-
-

@@ -44,7 +44,7 @@ def compute_initial_condition_for_each_patient():
     sim_parameters, slurm_job_id, patients_parameters = preamble()
 
     # For each patient, compute initial condition
-    for patient_number in [1, 2]:
+    for patient_number in [0, 1, 2]:
         logger.info(f"Starting computation for patient{patient_number}")
 
         current_patient_parameter = patients_parameters[f"patient{patient_number}"]  # load patient params
@@ -55,7 +55,7 @@ def compute_initial_condition_for_each_patient():
                        patient_parameters=current_patient_parameter,
                        steps=0,
                        save_rate=10,
-                       out_folder_name=f"patient{patient_number}_initial_condition",
+                       out_folder_name=f"dolfinx_patient{patient_number}_initial_condition",
                        sim_rationale=f"Computed initial condition for patient{patient_number}",
                        slurm_job_id=slurm_job_id,
                        recompute_mesh=True,
@@ -101,7 +101,7 @@ def check_tip_cell_activation_for_each_patient():
         test_tip_cell_activation(spatial_dimension=3,
                                  standard_sim_parameters=sim_parameters,
                                  patient_parameters=current_patient_parameter,
-                                 out_folder_name=f"patient{patient_number}_tip-cell-activation",
+                                 out_folder_name=f"dolfinx_patient{patient_number}_tip-cell-activation",
                                  slurm_job_id=slurm_job_id,
                                  recompute_mesh=True,
                                  recompute_c0=True,
@@ -129,7 +129,7 @@ def tip_cell_activation_patient1():
     test_tip_cell_activation(spatial_dimension=3,
                              standard_sim_parameters=sim_parameters,
                              patient_parameters=patients_parameters["patient1"],
-                             out_folder_name=f"patient1_tip-cell-activation",
+                             out_folder_name=f"dolfinx_patient1_tip-cell-activation",
                              out_folder_mode="datetime",
                              slurm_job_id=slurm_job_id,
                              recompute_mesh=True,
@@ -167,7 +167,7 @@ def patient1_vascular_sprouting():
                        patient_parameters=patients_parameters["patient1"],
                        steps=n_steps,
                        save_rate=50,
-                       out_folder_name="patient1_vascular-sprouting",
+                       out_folder_name="dolfinx_patient1_vascular-sprouting",
                        out_folder_mode="datetime",
                        sim_rationale=f"Testing the condition for the activation of the Tip Cells, I found "
                                      f"that when V_pT_af equals the maximum range value ({V_pT_af_max:.2e}) and "
@@ -208,7 +208,7 @@ def tip_cell_activation_patient0_and_2():
         test_tip_cell_activation(spatial_dimension=3,
                                  standard_sim_parameters=sim_parameters,
                                  patient_parameters=patients_parameters[patient],
-                                 out_folder_name=f"{patient}_tip-cell-activation",
+                                 out_folder_name=f"dolfinx_{patient}_tip-cell-activation",
                                  out_folder_mode="datetime",
                                  sim_rationale=sim_rationale,
                                  slurm_job_id=slurm_job_id,
@@ -252,7 +252,7 @@ def tip_cell_activation_V_pT_and_V_uc_ranges_for_each_patient():
         test_tip_cell_activation(spatial_dimension=3,
                                  standard_sim_parameters=sim_parameters,
                                  patient_parameters=patients_parameters[patient],
-                                 out_folder_name=f"{patient}_tip-cell-activation",
+                                 out_folder_name=f"dolfinx_{patient}_tip-cell-activation",
                                  out_folder_mode="datetime",
                                  sim_rationale=sim_rationale,
                                  slurm_job_id=slurm_job_id,
@@ -292,7 +292,7 @@ def test_adaptive_vascular_sprouting_for_patient1():
                                           delta_steps=5,
                                           trigger_adaptive_tc_activation_after_steps=3,
                                           save_rate=10,
-                                          out_folder_name="patient1_test-vascular-sprouting-adaptive",
+                                          out_folder_name="dolfinx_patient1_test-vascular-sprouting-adaptive",
                                           out_folder_mode="datetime",
                                           sim_rationale=sim_rationale + " | ADAPTIVE",
                                           slurm_job_id=slurm_job_id,
@@ -319,7 +319,7 @@ def test_different_tipe_steps_patient1():
                        patient_parameters=patients_parameters["patient1"],
                        steps=n_steps,
                        save_rate=50,
-                       out_folder_name="patient1_test-dt",
+                       out_folder_name="dolfinx_patient1_test-dt",
                        out_folder_mode="datetime",
                        sim_rationale=sim_rationale,
                        slurm_job_id=slurm_job_id,

@@ -3,31 +3,30 @@ import json
 import logging
 import socket
 import subprocess
-import fenics
+from mpi4py import MPI
 import pandas as pd
 from mocafe.fenut.parameters import Parameters
 from src.simulation import run_simulation, resume_simulation, test_tip_cell_activation
 import src.experiments
-import visualization.python.activation_tiles
 
 
 # get process rank
-comm_world = fenics.MPI.comm_world
-rank = comm_world.Get_rank()
+comm_world = MPI.COMM_WORLD
+rank = comm_world.rank
 
 # set fenics log level
 # fenics.set_log_level(fenics.LogLevel.ERROR)
 
 # set up logger
-logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)
 ch = logging.StreamHandler(stream=sys.stdout)
 ch.setLevel(logging.DEBUG)
 formatter = logging.Formatter(f"%(asctime)s (%(created)f) | "
                               f"host={socket.gethostname().ljust(8, ' ')}:p{str(rank).zfill(2)} | "
                               f"%(name)s:%(funcName)s:%(levelname)s: %(message)s")
 ch.setFormatter(formatter)
-logger.addHandler(ch)
+logging.root.handlers = []  # removing default logger
+logging.root.addHandler(ch)  # adding my handler
+logging.root.setLevel(logging.DEBUG)  # setting root logger level
 
 
 def tutorial_2d():
@@ -45,8 +44,6 @@ def tutorial_2d():
     parameters_csv = "notebooks/out/g_parameters.csv"
     standard_parameters_df = pd.read_csv(parameters_csv, index_col="name")
 
-    # wait for all processes
-    comm_world.Barrier()
 
     # -- Get Slurm job id, if any
     if "-slurm_job_id" in sys.argv:
@@ -255,7 +252,7 @@ def test():
 
 def main():
     # patient1_vascular_sprouting()
-    src.experiments.test_different_tipe_steps_patient1()
+    src.experiments.compute_initial_condition_for_each_patient()
 
 
 if __name__ == "__main__":

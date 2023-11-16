@@ -1,17 +1,17 @@
 """
 Code used only in 2D simulations
 """
-
-import fenics
-import pandas as pd
 import pint
 import numpy as np
+import pandas as pd
 from typing import Dict
+import dolfinx
+from mpi4py import MPI
 from mocafe.fenut.parameters import Parameters
 
 # get process rank
-comm_world = fenics.MPI.comm_world
-rank = comm_world.Get_rank()
+comm_world = MPI.COMM_WORLD
+rank = comm_world.rank
 
 
 def compute_2d_mesh_for_patient(
@@ -44,10 +44,9 @@ def compute_2d_mesh_for_patient(
     ny: int = int(np.floor(Ly.magnitude / (R_c / 2)))
 
     # define mesh
-    mesh: fenics.RectangleMesh = fenics.RectangleMesh(fenics.Point(0., 0.),
-                                                      fenics.Point(Lx.magnitude, Ly.magnitude),
-                                                      nx,
-                                                      ny)
+    mesh = dolfinx.mesh.create_rectangle(comm=MPI.COMM_WORLD,
+                                         points=[[0., 0.], [Lx, Ly]],
+                                         n=[nx, ny])
 
     # define mesh parameters
     mesh_parameters: Dict = {

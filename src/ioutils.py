@@ -1,16 +1,16 @@
 import json
 import shutil
 import socket
-import fenics
 import logging
 import functools
 import pandas as pd
 from pathlib import Path
+from mpi4py import MPI
 from mocafe.fenut.parameters import Parameters
 
 # get process rank
-comm_world = fenics.MPI.comm_world
-rank = comm_world.Get_rank()
+comm_world = MPI.COMM_WORLD
+rank = comm_world.rank
 
 # set up logger
 logger = logging.getLogger(__name__)

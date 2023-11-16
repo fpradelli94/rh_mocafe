@@ -1,23 +1,20 @@
 """
 Code used only in 3D simulations
 """
-import sys
-
-import fenics
+import dolfinx
+from mpi4py import MPI
 import pandas as pd
 import pint
 import numpy as np
 import logging
 from pathlib import Path
 from typing import Dict, Tuple
-import skimage.io as io
 from mocafe.fenut.parameters import Parameters
-from src.expressions import Vessel3DReconstruction2
-from src.ioutils import read_parameters, write_parameters
+from src.ioutils import read_parameters
 
 # get process rank
-comm_world = fenics.MPI.comm_world
-rank = comm_world.Get_rank()
+comm_world = MPI.COMM_WORLD
+rank = comm_world.rank
 
 # get logger
 logger = logging.getLogger(__name__)
@@ -29,7 +26,7 @@ def get_3d_mesh_for_patient(
         patient_parameters: Dict,
         mesh_file: Path,
         mesh_parameters_file: Path,
-        recompute_mesh: bool) -> Tuple[fenics.BoxMesh, Parameters]:
+        recompute_mesh: bool) -> Tuple[dolfinx.mesh.Mesh, Parameters]:
     """
     Get a ``BoxMesh`` suitable for the simulation, given the patient parameters listed in the given
     dictionary.
@@ -60,21 +57,21 @@ def get_3d_mesh_for_patient(
         mesh, mesh_parameters = _compute_3d_mesh_for_patient(parameters_df,
                                                              local_ureg,
                                                              patient_parameters)
-        # save mesh
-        with fenics.XDMFFile(str(mesh_file.resolve())) as outfile:
-            outfile.write(mesh)
+        # # save mesh
+        # with fenics.XDMFFile(str(mesh_file.resolve())) as outfile:
+        #     outfile.write(mesh)
+        #
+        # # save mesh parameters
+        # write_parameters(mesh_parameters, mesh_parameters_file)
+        #
+        # # delete mesh
+        # del mesh
 
-        # save mesh parameters
-        write_parameters(mesh_parameters, mesh_parameters_file)
-
-        # delete mesh
-        del mesh
-
-    # in any case, reload the mesh (to ensure consistent distribution of the dofs)
-    logger.info(f"Loading mesh...")
-    mesh = fenics.Mesh()
-    with fenics.XDMFFile(str(mesh_file.resolve())) as infile:
-        infile.read(mesh)
+    # # in any case, reload the mesh (to ensure consistent distribution of the dofs)
+    # logger.info(f"Loading mesh...")
+    # mesh = fenics.Mesh()
+    # with fenics.XDMFFile(str(mesh_file.resolve())) as infile:
+    #     infile.read(mesh)
 
     return mesh, mesh_parameters
 
@@ -82,7 +79,7 @@ def get_3d_mesh_for_patient(
 def _compute_3d_mesh_for_patient(
         parameters_df: pd.DataFrame,
         local_ureg: pint.UnitRegistry,
-        patient_parameters: Dict) -> Tuple[fenics.BoxMesh, Parameters]:
+        patient_parameters: Dict) -> Tuple[dolfinx.mesh.Mesh, Parameters]:
     """
     Generate a ``BoxMesh`` suitable for the simulation, given the patient parameters listed in the given
     dictionary
@@ -101,21 +98,20 @@ def _compute_3d_mesh_for_patient(
                              * local_ureg(patient_parameters["simulation_box"]["Lz"]["mu"])
 
     # convert Lx and Ly to sau
-    Lx: pint.Quantity = Lx_real.to("sau")
-    Ly: pint.Quantity = Ly_real.to("sau")
-    Lz: pint.Quantity = Lz_real.to("sau")
+    Lx: float = Lx_real.to("sau").magnitude
+    Ly: float = Ly_real.to("sau").magnitude
+    Lz: float = Lz_real.to("sau").magnitude
 
     # compute nx and ny based on R_c size
     R_c: float = parameters_df.loc['R_c', 'sim_value']
-    nx: int = int(np.floor(Lx.magnitude / (R_c*0.7)))
-    ny: int = int(np.floor(Ly.magnitude / (R_c*0.7)))
-    nz: int = int(np.floor(Lz.magnitude / (R_c*0.7)))
+    nx: int = int(np.floor(Lx / (R_c*0.7)))
+    ny: int = int(np.floor(Ly / (R_c*0.7)))
+    nz: int = int(np.floor(Lz / (R_c*0.7)))
 
     # define mesh
-    mesh: fenics.BoxMesh = fenics.BoxMesh(comm_world,
-                                          fenics.Point(0., 0., 0.),
-                                          fenics.Point(Lx.magnitude, Ly.magnitude, Lz.magnitude),
-                                          nx, ny, nz)
+    mesh = dolfinx.mesh.create_box(comm_world,
+                                   points=[[0., 0., 0.], [Lx, Ly, Lz]],
+                                   n=[nx, ny, nz])
 
     # define mesh parameters
     mesh_parameters: Dict = {
@@ -143,9 +139,9 @@ def _compute_3d_mesh_for_patient(
                     None,
                     None,
                     None],
-        "sim_value": [Lx.magnitude,
-                      Ly.magnitude,
-                      Lz.magnitude,
+        "sim_value": [Lx,
+                      Ly,
+                      Lz,
                       nx,
                       ny,
                       nz],
@@ -165,66 +161,3 @@ def _compute_3d_mesh_for_patient(
 
     # return both
     return mesh, Parameters(pd.DataFrame(mesh_parameters))
-
-
-def get_3d_c0(c_old: fenics.Function,
-              patient_parameters: Dict,
-              mesh_parameters: Parameters,
-              c0_xdmf: Path,
-              recompute_c0: bool,
-              write_checkpoints: bool) -> None:
-    """
-    Get the 3d initial condition for c0. If c0_xdmf is empty, it computes the initial condition and saves it in the
-    file for future reuse.
-
-    :param c_old: FEniCS function to store initial condition
-    :param patient_parameters: patient-specific parameters Dict
-    :param mesh_parameters: mesh parameters (used in the computation)
-    :param c0_xdmf: file containing c0 (if already computed once)
-    :param write_checkpoints: set to True if the latest computed c0 should be stored as XDMF file
-    :param recompute_c0: force the function to recompute c0 even if c0_xdmf is not empty.
-    """
-
-    # define c0_label in xdmf file
-    c0_label = "c0"
-
-    # if c0 file exists and it is not necessary to recompute it, load it. Else compute it.
-    if c0_xdmf.exists() and (recompute_c0 is False):
-        logger.info(f"Found existing c0 in {c0_xdmf}. Loading...")
-        with fenics.XDMFFile(str(c0_xdmf.resolve())) as infile:
-            infile.read_checkpoint(c_old, c0_label, 0)
-    else:
-        # compute c0
-        logger.info("Computing c0...")
-        _compute_3d_c_0(c_old, patient_parameters, mesh_parameters)
-        # store c0
-        if write_checkpoints:
-            with fenics.XDMFFile(str(c0_xdmf.resolve())) as outfile:
-                outfile.write_checkpoint(c_old, c0_label, 0, fenics.XDMFFile.Encoding.HDF5, False)
-
-
-def _compute_3d_c_0(c_old: fenics.Function,
-                    patient_parameters: Dict,
-                    mesh_parameters: Parameters):
-    """
-    Computes c initial condition in 3D
-    """
-    # load images
-    pic2d_file = patient_parameters["pic2d"]
-    # pic2d_skeleton_file = pic2d_file.replace("pic2d.png", "pic2d_skeleton.png")
-    # pic2d_edges_file = pic2d_file.replace("pic2d.png", "pic2d_edges.png")
-    pic2d_dt_file = pic2d_file.replace("pic2d.png", "pic2d_dt.npy")
-    binary = io.imread(pic2d_file)
-    # skeleton = io.imread(pic2d_skeleton_file)
-    # edges = io.imread(pic2d_edges_file)
-    pic2d_distance_transform = np.load(pic2d_dt_file)
-    half_depth = patient_parameters["half_depth"]
-    c_old_expression = Vessel3DReconstruction2(z_0=mesh_parameters.get_value("Lz") - half_depth,
-                                               binary_array=binary,
-                                               distance_transform_array=pic2d_distance_transform,
-                                               mesh_Lx=mesh_parameters.get_value("Lx"),
-                                               mesh_Ly=mesh_parameters.get_value("Ly"),
-                                               half_depth=half_depth)
-    del binary, pic2d_distance_transform
-
-    c_old.interpolate(c_old_expression)

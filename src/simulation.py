@@ -1,37 +1,39 @@
 """
 Contains methods and classes to run and resume simulations in 2D and 3D
 """
-import fenics
-import time
-import json
-import logging
-from pathlib import Path
 import sys
-import pandas as pd
-from itertools import product
-from pint import Quantity, UnitRegistry
-from tqdm import tqdm
-import numpy as np
+import time
 import shutil
+import logging
+import skimage
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+from pathlib import Path
+from itertools import product
 from typing import Dict, List
+from pint import Quantity, UnitRegistry
+import ufl
+import dolfinx
+from dolfinx.nls.petsc import NewtonSolver
+from mpi4py import MPI
 from petsc4py import PETSc
 import mocafe.fenut.fenut as fu
 import mocafe.fenut.mansimdata as mansim
 import mocafe.angie.forms
 from mocafe.fenut.parameters import Parameters
 from mocafe.angie.tipcells import TipCellManager, load_tip_cells_from_json
-from mocafe.fenut.solvers import PETScProblem, PETScNewtonSolver
 import src.forms
 from src.ioutils import (read_parameters, write_parameters, dump_json, load_json, move_files_once_per_node,
                          rmtree_if_exists_once_per_node)
-from src.expressions import get_growing_RH_expression, BWImageExpression
+from src.expressions import RHEllipsoid, VesselReconstruction
 from src.simulation2d import compute_2d_mesh_for_patient
-from src.simulation3d import get_3d_mesh_for_patient, get_3d_c0
+from src.simulation3d import get_3d_mesh_for_patient
 
 
 # MPI variables
-comm_world = fenics.MPI.comm_world
-rank = comm_world.Get_rank()
+comm_world = MPI.COMM_WORLD
+rank = comm_world.rank
 
 # get logger
 logger = logging.getLogger(__name__)
@@ -48,9 +50,9 @@ def get_ureg_with_arbitrary_units(sim_parameters: Parameters):
     parameters_df = sim_parameters.as_dataframe()
 
     # set name of arbitrary units as defined in the parameters
-    sau_name = "Space Arbitrary Unit"
-    tau_name = "Time Arbitrary Unit"
-    afau_name = "AFs Arbitrary Unit"
+    sau_name = "SpaceArbitraryUnit"
+    tau_name = "TimeArbitraryUnit"
+    afau_name = "AFsArbitraryUnit"
 
     # define sau, tau and afau according to dataframe
     local_ureg.define(f"{sau_name} = "
@@ -59,11 +61,83 @@ def get_ureg_with_arbitrary_units(sim_parameters: Parameters):
     local_ureg.define(f"{tau_name} = "
                       f"{parameters_df.loc[tau_name, 'real_value']} * {parameters_df.loc[tau_name, 'real_um']} = "
                       f"tau")
-    local_ureg.define(f"af concentration arbitrary unit = "
+    local_ureg.define(f"{afau_name} = "
                       f"{parameters_df.loc[afau_name, 'real_value']} * {parameters_df.loc[afau_name, 'real_um']} = "
                       f"afau")
 
     return local_ureg
+
+
+def get_c0(spatial_dimension: int,
+           c_old: dolfinx.fem.Function,
+           patient_parameters: Dict,
+           mesh_parameters: Parameters,
+           c0_xdmf: Path,
+           recompute_c0: bool,
+           write_checkpoints: bool) -> None:
+    """
+    Get the initial condition for c0. If c0_xdmf is empty, it computes the initial condition and saves it in the
+    file for future reuse.
+
+    :param spatial_dimension: 2D or 3D
+    :param c_old: FEniCS function to store initial condition
+    :param patient_parameters: patient-specific parameters Dict
+    :param mesh_parameters: mesh parameters (used in the computation)
+    :param c0_xdmf: file containing c0 (if already computed once)
+    :param write_checkpoints: set to True if the latest computed c0 should be stored as XDMF file
+    :param recompute_c0: force the function to recompute c0 even if c0_xdmf is not empty.
+    """
+
+    # # define c0_label in xdmf file
+    # c0_label = "c0"
+
+    # if c0 file exists and it is not necessary to recompute it, load it. Else compute it.
+    if c0_xdmf.exists() and (recompute_c0 is False):
+        # logger.info(f"Found existing c0 in {c0_xdmf}. Loading...")
+        # with fenics.XDMFFile(str(c0_xdmf.resolve())) as infile:
+        #     infile.read_checkpoint(c_old, c0_label, 0)
+        raise NotImplementedError(f"Mesh loading not implemented yet")
+    else:
+        # compute c0
+        logger.info("Computing c0...")
+        _compute_c_0(spatial_dimension, c_old, patient_parameters, mesh_parameters)
+        # store c0
+        if write_checkpoints:
+            # with fenics.XDMFFile(str(c0_xdmf.resolve())) as outfile:
+            #     outfile.write_checkpoint(c_old, c0_label, 0, fenics.XDMFFile.Encoding.HDF5, False)
+            raise NotImplementedError(f"Checkpointing not implemented yet")
+
+
+def _compute_c_0(spatial_dimension: int,
+                 c_old: dolfinx.fem.Function,
+                 patient_parameters: Dict,
+                 mesh_parameters: Parameters):
+    """
+    Computes c initial condition in 3D
+    """
+    # load binary image
+    pic2d_file = patient_parameters["pic2d"]
+    # load distance transform
+    pic2d_dt_file = pic2d_file.replace("pic2d.png", "pic2d_dt.npy")
+    binary = skimage.io.imread(pic2d_file)
+    pic2d_distance_transform = np.load(pic2d_dt_file)
+    # get half depth
+    half_depth = patient_parameters["half_depth"]
+    # get z0 according to spatial dimension
+    if spatial_dimension == 2:
+        z0 = 0
+    else:
+        z0 = mesh_parameters.get_value("Lz") - half_depth
+    c_old_expression = VesselReconstruction(z_0=z0,
+                                            binary_array=binary,
+                                            distance_transform_array=pic2d_distance_transform,
+                                            mesh_Lx=mesh_parameters.get_value("Lx"),
+                                            mesh_Ly=mesh_parameters.get_value("Ly"),
+                                            half_depth=half_depth)
+    del binary, pic2d_distance_transform
+
+    c_old.interpolate(c_old_expression.eval)
+    c_old.x.scatter_forward()
 
 
 class GradientEvaluator:
@@ -73,12 +147,14 @@ class GradientEvaluator:
     """
     def __init__(self):
         self.solver = None
+        self.a = None
 
     def compute_gradient(self,
-                         f: fenics.Function,
-                         V: fenics.FunctionSpace,
-                         sol: fenics.Function,
-                         options: Dict = None):
+                         f: dolfinx.fem.Function,
+                         V: dolfinx.fem.FunctionSpace,
+                         sol: dolfinx.fem.Function,
+                         options: Dict = None,
+                         destroy: bool = False):
         """
         Efficiently compute the gradient of a function.
 
@@ -91,33 +167,45 @@ class GradientEvaluator:
         if options is None:
             options = {}
         # define test function
-        v = fenics.TestFunction(V)
-        # define variational form
+        v = ufl.TestFunction(V)
+
+        # define lhs variational form (time independent)
         if self.solver is None:
             # define trial function
-            u = fenics.TrialFunction(V)
+            u = ufl.TrialFunction(V)
+            # define lhs for problem of finding the gradient
+            a = dolfinx.fem.form(ufl.dot(u, v) * ufl.dx)
+            self.a = a
             # define operator
-            A = fenics.PETScMatrix()
-            a = fenics.dot(u, v) * fenics.dx
-            fenics.assemble(a, tensor=A)
-            # define solver
-            petsc_options = PETSc.Options()
-            for option, value in options.items():
-                petsc_options.setValue(option, value)
-            ksp = PETSc.KSP().create()
+            A = dolfinx.fem.petsc.assemble_matrix(a, [])
+            A.assemble()
+            # init solver
+            ksp = PETSc.KSP().create(comm_world)
+            # set solver options
+            opts = PETSc.Options()
+            for opt, opt_value in options.items():
+                opts[opt] = opt_value
             ksp.setFromOptions()
-            ksp.setOperators(fenics.as_backend_type(A).mat())
+            # set operator
+            ksp.setOperators(A)
             # set solver
             self.solver = ksp
+            # destroy A
+            A.destroy()
 
         # define b
-        L = fenics.inner(fenics.grad(f), v) * fenics.dx
-        b = fenics.PETScVector()
-        fenics.assemble(L, tensor=b)
-        b = fenics.as_backend_type(b).vec()
+        L = dolfinx.fem.form(ufl.inner(ufl.grad(f), v) * ufl.dx)
+        b = dolfinx.fem.petsc.assemble_vector(L)
+        dolfinx.fem.petsc.apply_lifting(b, [self.a], [[]])
+        b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
         # solve
-        self.solver.solve(b, sol.vector().vec())
-        sol.vector().update_ghost_values()
+        self.solver.solve(b, sol.vector)
+        sol.x.scatter_forward()
+
+        # destroy
+        b.destroy()
+        if destroy:
+            self.solver.destroy()
 
 
 class RHSimulation:
@@ -210,8 +298,6 @@ class RHSimulation:
             if self.slurm_job_id is not None:
                 self.slurm_folder.mkdir(exist_ok=True)
 
-        comm_world.Barrier()
-
     def _fill_reproduce_folder(self):
         if rank == 0:
             # patterns ignored when copying code after simulation
@@ -234,8 +320,6 @@ class RHSimulation:
                             dst=str(self.reproduce_folder.resolve()),
                             ignore=shutil.ignore_patterns(*ignored_patterns))
 
-        comm_world.Barrier()
-
     def _generate_mesh(self):
         if self.spatial_dimension == 2:
             mesh, mesh_parameters = compute_2d_mesh_for_patient(self.sim_parameters.as_dataframe(),
@@ -255,33 +339,30 @@ class RHSimulation:
 
     def _spatial_discretization(self):
         self.V = fu.get_mixed_function_space(self.mesh, 3)
-        self.vec_V = fenics.VectorFunctionSpace(self.mesh, "CG", 1)  # for grad_af
+        self.vec_V = dolfinx.fem.FunctionSpace(self.mesh, ufl.VectorElement("P", self.mesh.ufl_cell(), 1))
 
     def _generate_sim_parameters_independent_initial_conditions(self):
         """
         Generate initial conditions not depending on from the simulaion parameters
         """
+        # get collapsed subspace
+        subV_collapsed, _ = self.V.sub(0).collapse()
+
         # capillaries
-        if self.spatial_dimension == 2:
-            c_old_expression = BWImageExpression(self.patient_parameters["pic2d"], [-1, 1], self.ureg)
-            self.c_old = fenics.interpolate(c_old_expression, self.V.sub(0).collapse())
-        else:
-            # define c0 function
-            self.c_old = fenics.Function(self.V.sub(0).collapse())
-            # get 3d c0
-            get_3d_c0(self.c_old, self.patient_parameters, self.mesh_parameters, self.cache_c0_xdmf,
-                      self.recompute_c0, self.write_checkpoints)
+        self.c_old = dolfinx.fem.Function(subV_collapsed)
+        get_c0(self.spatial_dimension, self.c_old, self.patient_parameters, self.mesh_parameters, self.cache_c0_xdmf,
+               self.recompute_c0, self.write_checkpoints)
         # name c_old
-        self.c_old.rename("c", "capillaries")
+        self.c_old.name = "c"
 
         # auxiliary fun for capillaries, initially set to 0
         logger.info(f"{self.out_folder_name}:Computing mu0...")
-        self.mu_old = fenics.interpolate(fenics.Constant(0.), self.V.sub(0).collapse())
+        self.mu_old = dolfinx.fem.Function(subV_collapsed)
 
         # t_c_f_function (dynamic tip cell position)
         logger.info(f"{self.out_folder_name}:Computing t_c_f_function...")
-        self.t_c_f_function = fenics.interpolate(fenics.Constant(0.), self.V.sub(0).collapse())
-        self.t_c_f_function.rename("tcf", "tip cells function")
+        self.t_c_f_function = dolfinx.fem.Function(subV_collapsed)
+        self.t_c_f_function.name = "tcf"
 
         # define initial time
         self.t0 = 0
@@ -290,30 +371,35 @@ class RHSimulation:
         """
         Generate initial conditions not depending on from the simulaion parameters
         """
+        # get collapsed subspace
+        subV_collapsed, _ = self.V.sub(0).collapse()
+
         # define initial condition for tumor
         logger.info(f"{self.out_folder_name}:Computing phi0...")
         # initial semiaxes of the tumor
-        self.phi_expression = get_growing_RH_expression(sim_parameters,
-                                                        self.patient_parameters,
-                                                        self.mesh_parameters,
-                                                        self.ureg,
-                                                        0,
-                                                        self.spatial_dimension)
-        self.phi = fenics.interpolate(self.phi_expression, self.V.sub(0).collapse())
-        self.phi.rename("phi", "retinal hemangioblastoma")
+        self.phi_expression = RHEllipsoid(sim_parameters,
+                                          self.patient_parameters,
+                                          self.mesh_parameters,
+                                          self.ureg,
+                                          0,
+                                          self.spatial_dimension)
+        self.phi = dolfinx.fem.Function(subV_collapsed)
+        self.phi.interpolate(self.phi_expression.eval)
+        self.phi.x.scatter_forward()
+        self.phi.name = "phi"
 
         # af
         logger.info(f"{self.out_folder_name}:Computing af0...")
-        self.af_old = fenics.Function(self.V.sub(0).collapse())
+        self.af_old = dolfinx.fem.Function(subV_collapsed)
         self.__compute_af_0(sim_parameters)
-        self.af_old.rename("af", "angiogenic factor")
+        self.af_old.name = "af"
 
         # af gradient
         logger.info(f"{self.out_folder_name}:Computing grad_af0...")
         self.ge = GradientEvaluator()
-        self.grad_af_old = fenics.Function(self.vec_V)
+        self.grad_af_old = dolfinx.fem.Function(self.vec_V)
         self.ge.compute_gradient(self.af_old, self.vec_V, self.grad_af_old, self.lsp)
-        self.grad_af_old.rename("grad_af", "angiogenic factor gradient")
+        self.grad_af_old.name = "grad_af"
 
         # define tip cell manager
         self.tip_cell_manager = TipCellManager(self.mesh, self.sim_parameters)
@@ -329,30 +415,38 @@ class RHSimulation:
         if options is None:
             options = self.lsp
         # get af variable
-        af = fenics.TrialFunction(self.V.sub(0).collapse())
+        subV_collapsed, _ = self.V.sub(0).collapse()
+        af = ufl.TrialFunction(subV_collapsed)
         # get test function
-        v = fenics.TestFunction(self.V.sub(0).collapse())
+        v = ufl.TestFunction(subV_collapsed)
         # built equilibrium form for af
         af_form = src.forms.angiogenic_factors_form_eq(af, self.phi, self.c_old, v, sim_parameters)
-        af_form_a = fenics.lhs(af_form)
-        af_form_L = fenics.rhs(af_form)
+        af_form_a = dolfinx.fem.form(ufl.lhs(af_form))
+        af_form_L = dolfinx.fem.form(ufl.rhs(af_form))
         # define operator
-        A = fenics.PETScMatrix()
-        fenics.assemble(af_form_a, tensor=A)
-        # define solver
-        petsc_options = PETSc.Options()
-        for option, value in options.items():
-            petsc_options.setValue(option, value)
-        ksp = PETSc.KSP().create()
+        A = dolfinx.fem.petsc.assemble_matrix(af_form_a, bcs=[])
+        A.assemble()
+        # init solver
+        ksp = PETSc.KSP().create(comm_world)
+        # set solver options
+        opts = PETSc.Options()
+        for o, v in options.items():
+            opts[o] = v
         ksp.setFromOptions()
-        ksp.setOperators(fenics.as_backend_type(A).mat())
+        # set operator
+        ksp.setOperators(A)
         # define b
-        b = fenics.PETScVector()
-        fenics.assemble(af_form_L, tensor=b)
-        b = fenics.as_backend_type(b).vec()
+        b = dolfinx.fem.petsc.assemble_vector(af_form_L)
+        dolfinx.fem.petsc.apply_lifting(b, [af_form_a], [[]])
+        b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
         # solve
-        ksp.solve(b, self.af_old.vector().vec())
-        self.af_old.vector().update_ghost_values()
+        ksp.solve(b, self.af_old.vector)
+        self.af_old.x.scatter_forward()
+
+        # destroy object (workaround for issue: https://github.com/FEniCS/dolfinx/issues/2559)
+        A.destroy()
+        b.destroy()
+        ksp.destroy()
 
     def _set_pbar(self, total: int):
         self.pbar = tqdm(total=total,
@@ -367,6 +461,9 @@ class RHSimulation:
         # close pbar file
         if (rank == 0) and (self.slurm_job_id is not None):
             self.pbar_file.close()
+
+        # destroy solver of gradient evaluator
+        self.ge.solver.destroy()
 
         # save sim report
         if self.runtime_error_occurred:
@@ -459,14 +556,14 @@ class RHTimeSimulation(RHSimulation):
         file_names = ["c", "af", "grad_af", "tipcells", "phi"]
         if self.save_distributed_files:
             # specific PVD files
-            self.c_pvd, self.af_pvd, self.grad_af_pvd, self.tipcells_pvd, self.phi_pvd = \
-                [fenics.File(str(self.distributed_data_folder / Path(f"{fn}.pvd"))) for fn in file_names]
+            self.c_file, self.af_file, self.grad_af_file, self.tipcells_file, self.phi_file = \
+                [dolfinx.io.VTKFile(comm_world, str(self.distributed_data_folder / Path(f"{fn}.pvd")), "w")
+                 for fn in file_names]
         else:
             # specific XDMF files
-            self.c_xdmf, self.af_xdmf, self.grad_af_xdmf, self.tipcells_xdmf, self.phi_xdmf = fu.setup_xdmf_files(
-                file_names,
-                self.data_folder,
-                {"flush_output": True, "rewrite_function_mesh": False})
+            self.c_file, self.af_file, self.grad_af_file, self.tipcells_file, self.phi_file = \
+                [dolfinx.io.XDMFile(comm_world, str(self.data_folder / Path(f"{fn}.xdmf")), "w")
+                 for fn in file_names]
 
         self.__resume_files_dict: Dict or None = None  # dictionary containing files to resume
 
@@ -495,9 +592,6 @@ class RHTimeSimulation(RHSimulation):
         # write initial conditions
         self._write_files(0)
 
-        # define solver before time iteration
-        self.solver = PETScNewtonSolver(self.lsp, self.mesh.mpi_comm())
-
         self._time_iteration()  # run simulation in time
 
         self._end_simulation()  # conclude time iteration
@@ -519,13 +613,14 @@ class RHTimeSimulation(RHSimulation):
             super()._sim_mkdir_list(self.distributed_data_folder, self.pvd_folder)
 
     def _resume_mesh(self):
-        assert self.__resumed, "Trying to resume mesh but simulation was not resumed"
-        logger.info(f"{self.out_folder_name}:Loading Mesh... ")
-        mesh = fenics.Mesh()
-        with fenics.XDMFFile(str(self.__resume_files_dict["mesh.xdmf"])) as infile:
-            infile.read(mesh)
-        self.mesh = mesh
-        self.mesh_parameters = read_parameters(self.__resume_files_dict["mesh_parameters.csv"])
+        raise NotImplementedError("Mesh reading not implemented yet")
+        # assert self.__resumed, "Trying to resume mesh but simulation was not resumed"
+        # logger.info(f"{self.out_folder_name}:Loading Mesh... ")
+        # mesh = fenics.Mesh()
+        # with fenics.XDMFFile(str(self.__resume_files_dict["mesh.xdmf"])) as infile:
+        #     infile.read(mesh)
+        # self.mesh = mesh
+        # self.mesh_parameters = read_parameters(self.__resume_files_dict["mesh_parameters.csv"])
 
     def _generate_initial_conditions(self):
         # generate initial conditions independent of sim parameters
@@ -534,103 +629,103 @@ class RHTimeSimulation(RHSimulation):
         super()._generate_sim_parameters_dependent_initial_conditions(self.sim_parameters)
 
     def _resume_initial_conditions(self):
-        # load incremental tip cells
-        input_itc = load_json(self.__resume_files_dict["incremental_tip_cells.json"])
+        raise NotImplementedError(f"Resuming not implmented yet")
+        # # load incremental tip cells
+        # input_itc = load_json(self.__resume_files_dict["incremental_tip_cells.json"])
+        #
+        # # get last stem of the resumed folder
+        # last_step = max([int(step.replace("step_", "")) for step in input_itc])
+        #
+        # # capillaries
+        # logger.info(f"{self.out_folder_name}:Loading c0... ")
+        # self.c_old = fenics.Function(self.V.sub(0).collapse())
+        # resume_c_xdmf = fenics.XDMFFile(str(self.__resume_files_dict["c.xdmf"]))
+        # with resume_c_xdmf as infile:
+        #     infile.read_checkpoint(self.c_old, "c", 0)
+        # self.c_old.rename("c", "capillaries")
+        #
+        # # mu
+        # logger.info(f"{self.out_folder_name}:Loading mu... ")
+        # self.mu_old = fenics.Function(self.V.sub(0).collapse())
+        # resume_mu_xdmf = fenics.XDMFFile(str(self.__resume_files_dict["mu.xdmf"]))
+        # with resume_mu_xdmf as infile:
+        #     infile.read_checkpoint(self.mu_old, "mu", 0)
+        #
+        # # phi
+        # logger.info(f"{self.out_folder_name}:Generating phi... ")
+        # self.phi_expression = get_growing_RH_expression(self.sim_parameters,
+        #                                                 self.patient_parameters,
+        #                                                 self.mesh_parameters,
+        #                                                 self.ureg,
+        #                                                 last_step,
+        #                                                 self.spatial_dimension)
+        # self.phi = fenics.interpolate(self.phi_expression, self.V.sub(0).collapse())
+        # self.phi.rename("phi", "retinal hemangioblastoma")
+        #
+        # # tcf function
+        # self.t_c_f_function = fenics.interpolate(fenics.Constant(0.), self.V.sub(0).collapse())
+        # self.t_c_f_function.rename("tcf", "tip cells function")
+        #
+        # # af
+        # logger.info(f"{self.out_folder_name}:Loading af... ")
+        # self.af_old = fenics.Function(self.V.sub(0).collapse())
+        # resume_af_xdmf = fenics.XDMFFile(str(self.__resume_files_dict["af.xdmf"]))
+        # with resume_af_xdmf as infile:
+        #     infile.read_checkpoint(self.af_old, "af", 0)
+        # self.af_old.rename("af", "angiogenic factor")
+        #
+        # # af gradient
+        # logger.info(f"{self.out_folder_name}:Loading af_grad... ")
+        # self.ge = GradientEvaluator()
+        # self.grad_af_old = fenics.Function(self.vec_V)
+        # resume_grad_af_xdmf = fenics.XDMFFile(str(self.__resume_files_dict["grad_af.xdmf"]))
+        # with resume_grad_af_xdmf as infile:
+        #     infile.read_checkpoint(self.grad_af_old, "grad_af", 0)
+        # self.grad_af_old.rename("grad_af", "angiogenic factor gradient")
+        #
+        # # define tip cell manager
+        # if rank == 0:
+        #     initial_tcs = load_tip_cells_from_json(str(self.__resume_files_dict["tipcells.json"]))
+        # else:
+        #     initial_tcs = None
+        # initial_tcs = comm_world.bcast(initial_tcs, 0)
+        # self.tip_cell_manager = TipCellManager(self.mesh,
+        #                                        self.sim_parameters,
+        #                                        initial_tcs=initial_tcs)
+        #
+        # # definie initial time
+        # self.t0 = last_step
 
-        # get last stem of the resumed folder
-        last_step = max([int(step.replace("step_", "")) for step in input_itc])
-
-        # capillaries
-        logger.info(f"{self.out_folder_name}:Loading c0... ")
-        self.c_old = fenics.Function(self.V.sub(0).collapse())
-        resume_c_xdmf = fenics.XDMFFile(str(self.__resume_files_dict["c.xdmf"]))
-        with resume_c_xdmf as infile:
-            infile.read_checkpoint(self.c_old, "c", 0)
-        self.c_old.rename("c", "capillaries")
-
-        # mu
-        logger.info(f"{self.out_folder_name}:Loading mu... ")
-        self.mu_old = fenics.Function(self.V.sub(0).collapse())
-        resume_mu_xdmf = fenics.XDMFFile(str(self.__resume_files_dict["mu.xdmf"]))
-        with resume_mu_xdmf as infile:
-            infile.read_checkpoint(self.mu_old, "mu", 0)
-
-        # phi
-        logger.info(f"{self.out_folder_name}:Generating phi... ")
-        self.phi_expression = get_growing_RH_expression(self.sim_parameters,
-                                                        self.patient_parameters,
-                                                        self.mesh_parameters,
-                                                        self.ureg,
-                                                        last_step,
-                                                        self.spatial_dimension)
-        self.phi = fenics.interpolate(self.phi_expression, self.V.sub(0).collapse())
-        self.phi.rename("phi", "retinal hemangioblastoma")
-
-        # tcf function
-        self.t_c_f_function = fenics.interpolate(fenics.Constant(0.), self.V.sub(0).collapse())
-        self.t_c_f_function.rename("tcf", "tip cells function")
-
-        # af
-        logger.info(f"{self.out_folder_name}:Loading af... ")
-        self.af_old = fenics.Function(self.V.sub(0).collapse())
-        resume_af_xdmf = fenics.XDMFFile(str(self.__resume_files_dict["af.xdmf"]))
-        with resume_af_xdmf as infile:
-            infile.read_checkpoint(self.af_old, "af", 0)
-        self.af_old.rename("af", "angiogenic factor")
-
-        # af gradient
-        logger.info(f"{self.out_folder_name}:Loading af_grad... ")
-        self.ge = GradientEvaluator()
-        self.grad_af_old = fenics.Function(self.vec_V)
-        resume_grad_af_xdmf = fenics.XDMFFile(str(self.__resume_files_dict["grad_af.xdmf"]))
-        with resume_grad_af_xdmf as infile:
-            infile.read_checkpoint(self.grad_af_old, "grad_af", 0)
-        self.grad_af_old.rename("grad_af", "angiogenic factor gradient")
-
-        # define tip cell manager
-        if rank == 0:
-            initial_tcs = load_tip_cells_from_json(str(self.__resume_files_dict["tipcells.json"]))
-        else:
-            initial_tcs = None
-        initial_tcs = comm_world.bcast(initial_tcs, 0)
-        self.tip_cell_manager = TipCellManager(self.mesh,
-                                               self.sim_parameters,
-                                               initial_tcs=initial_tcs)
-
-        # definie initial time
-        self.t0 = last_step
-
-    def _write_files(self, t: int):
-        # write files
-        if self.save_distributed_files:
-            logger.info(f"Starting writing of PVD files ")
+    def _write_files(self, t: int, write_mesh: bool = False):
+        # write mesh
+        if write_mesh:
+            logger.info(f"Starting writing Mesh")
             logger.info(f"Writing af_pvd... ")
-            self.af_pvd << (self.af_old, t)
+            self.af_file.write_mesh(self.mesh)
             logger.info(f"Writing c_pvd... ")
-            self.c_pvd << (self.c_old, t)
+            self.c_file.write_mesh(self.mesh)
             logger.info(f"Writing grad_af_pvd... ")
-            self.grad_af_pvd << (self.grad_af_old, t)
+            self.grad_af_file.write_mesh(self.mesh)
             logger.info(f"Writing phi_pvd... ")
-            self.phi_pvd << (self.phi, t)
+            self.phi_file.write_mesh(self.mesh)
             logger.info(f"Writing tipcells_pvd... ")
-            self.tipcells_pvd << (self.t_c_f_function, t)
-        else:
-            logger.info(f"Starting writing of XDMF files ")
-            logger.info(f"Writing af_xdmf... ")
-            self.af_xdmf.write(self.af_old, t)
-            logger.info(f"Writing c_xdmf... ")
-            self.c_xdmf.write(self.c_old, t)
-            logger.info(f"Writing grad_af_xdmf... ")
-            self.grad_af_xdmf.write(self.grad_af_old, t)
-            logger.info(f"Writing phi_xdmf... ")
-            self.phi_xdmf.write(self.phi, t)
-            # save tip cells current position
-            logger.info(f"Writing tipcells_xdmf... ")
-            self.tipcells_xdmf.write(self.t_c_f_function, t)
+            self.tipcells_file.write_mesh(self.mesh)
+        # write functions
+        logger.info(f"Starting writing of PVD files ")
+        logger.info(f"Writing af_pvd... ")
+        self.af_file.write_function(self.af_old, t)
+        logger.info(f"Writing c_pvd... ")
+        self.c_file.write_function(self.c_old, t)
+        logger.info(f"Writing grad_af_pvd... ")
+        self.grad_af_file.write_function(self.grad_af_old, t)
+        logger.info(f"Writing phi_pvd... ")
+        self.phi_file.write_function(self.phi, t)
+        logger.info(f"Writing tipcells_pvd... ")
+        self.tipcells_file.write_function(self.t_c_f_function, t)
 
-    def _solve(self, problem: PETScProblem, u: fenics.Function):
+    def _solve(self, u: dolfinx.fem.Function):
         try:
-            self.solver.solve(problem, u.vector())
+            self.solver.solve(u)
         except RuntimeError as e:
             # store error info
             self.runtime_error_occurred = True
@@ -640,12 +735,11 @@ class RHTimeSimulation(RHSimulation):
     def _time_iteration(self):
         # define weak form
         logger.info(f"{self.out_folder_name}:Defining weak form...")
-        u = fenics.Function(self.V)
-        # assign functions to u
-        fenics.assign(u, [self.af_old, self.c_old, self.mu_old])
-        af, c, mu = fenics.split(u)
+        u = dolfinx.fem.Function(self.V)
+        # split u
+        af, c, mu = ufl.split(u)
         # define test functions
-        v1, v2, v3 = fenics.TestFunctions(self.V)
+        v1, v2, v3 = ufl.TestFunctions(self.V)
         # build total form
         af_form = src.forms.angiogenic_factors_form_dt(af, self.af_old, self.phi, c, v1, self.sim_parameters)
         capillaries_form = mocafe.angie.forms.angiogenesis_form_no_proliferation(
@@ -654,9 +748,19 @@ class RHTimeSimulation(RHSimulation):
 
         # define problem
         logger.info(f"{self.out_folder_name}:Defining problem...")
-        # define Jacobian
-        J = fenics.derivative(form, u)
-        problem = PETScProblem(J, form, [])
+        problem = dolfinx.fem.petsc.NonlinearProblem(form, u)
+
+        # define solver
+        self.solver = NewtonSolver(comm_world, problem)
+        if "ksp_monitor" in self.lsp.keys():
+            self.solver.report = True  # report iterations
+        # set options for krylov solver
+        ksp = self.solver.krylov_solver
+        opts = PETSc.Options()
+        option_prefix = ksp.getOptionsPrefix()
+        for o, v in self.lsp.items():
+            opts[f"{option_prefix}{o}"] = v
+        ksp.setFromOptions()
 
         # init time iteration
         t = self.t0
@@ -685,19 +789,26 @@ class RHTimeSimulation(RHSimulation):
             self.tip_cell_manager.save_incremental_tip_cells(f"{self.report_folder}/incremental_tipcells.json", step)
 
             # solve
-            self._solve(problem, u)
+            self._solve(u)
 
             # if error occurred, stop iteration
             if self.runtime_error_occurred:
                 break
 
             # assign to old
-            fenics.assign([self.af_old, self.c_old, self.mu_old], u)
+            new_af, new_c, new_mu = u.split()
+            self.af_old.interpolate(new_af)
+            self.af_old.x.scatter_forward()
+            self.c_old.interpolate(new_c)
+            self.c_old.x.scatter_forward()
+            self.af_old.interpolate(new_mu)
+            self.af_old.x.scatter_forward()
             # assign new value to grad_af_old
             self.ge.compute_gradient(self.af_old, self.vec_V, self.grad_af_old, self.lsp)
             # assign new value to phi
-            self.phi_expression.t = t  # update time
-            self.phi.assign(fenics.interpolate(self.phi_expression, self.V.sub(0).collapse()))
+            self.phi_expression.update_time(t)
+            self.phi.interpolate(self.phi_expression.eval)
+            self.phi.x.scatter_forward()
 
             # save
             if (step % self.save_rate == 0) or (step == self.steps) or self.runtime_error_occurred:
@@ -711,6 +822,13 @@ class RHTimeSimulation(RHSimulation):
         if self.write_checkpoints:
             self._save_resume_info()
 
+        # close files
+        self.c_file.close()
+        self.af_file.close()
+        self.grad_af_file.close()
+        self.tipcells_file.close()
+        self.phi_file.close()
+
         # mv distributed files to data folder
         if self.save_distributed_files:
             move_files_once_per_node(src_folder=self.distributed_data_folder, dst=self.pvd_folder)
@@ -723,28 +841,29 @@ class RHTimeSimulation(RHSimulation):
         Save the mesh and/or the fenics Functions in a resumable format (i.e. using the FEniCS function
         `write_checkpoint`).
         """
-        logger.info("Starting checkpoint write")
-
-        # init list of saved file
-        saved_files = {}
-
-        # copy cached mesh in resume folder
-        for mf in self.cache_mesh_folder.glob("mesh.*"):
-            shutil.copy(mf, self.resume_folder)
-
-        # write functions
-        fnc_dict = {"af": self.af_old, "c": self.c_old, "mu": self.mu_old, "phi": self.phi, "grad_af": self.grad_af_old}
-        for name, fnc in fnc_dict.items():
-            file_name = f"{self.resume_folder}/{name}.xdmf"
-            with fenics.XDMFFile(file_name) as outfile:
-                logger.info(f"Checkpoint writing of {name}....")
-                outfile.write_checkpoint(fnc, name, 0, fenics.XDMFFile.Encoding.HDF5, False)
-            saved_files[name] = str(Path(file_name).resolve())
-
-        # store tip cells position
-        file_name = f"{self.resume_folder}/tipcells.json"
-        self.tip_cell_manager.save_tip_cells(file_name)
-        saved_files["tipcells"] = str(Path(file_name).resolve())
+        raise NotImplementedError("Resuming not implemented yet")
+        # logger.info("Starting checkpoint write")
+        #
+        # # init list of saved file
+        # saved_files = {}
+        #
+        # # copy cached mesh in resume folder
+        # for mf in self.cache_mesh_folder.glob("mesh.*"):
+        #     shutil.copy(mf, self.resume_folder)
+        #
+        # # write functions
+        # fnc_dict = {"af": self.af_old, "c": self.c_old, "mu": self.mu_old, "phi": self.phi, "grad_af": self.grad_af_old}
+        # for name, fnc in fnc_dict.items():
+        #     file_name = f"{self.resume_folder}/{name}.xdmf"
+        #     with fenics.XDMFFile(file_name) as outfile:
+        #         logger.info(f"Checkpoint writing of {name}....")
+        #         outfile.write_checkpoint(fnc, name, 0, fenics.XDMFFile.Encoding.HDF5, False)
+        #     saved_files[name] = str(Path(file_name).resolve())
+        #
+        # # store tip cells position
+        # file_name = f"{self.resume_folder}/tipcells.json"
+        # self.tip_cell_manager.save_tip_cells(file_name)
+        # saved_files["tipcells"] = str(Path(file_name).resolve())
 
     @classmethod
     def resume(cls,
@@ -862,24 +981,25 @@ class RHTimeAdaptiveSimulation(RHTimeSimulation):
                          write_checkpoints,
                          save_distributed_files_to)
         # init time window
+        self.delta_steps = delta_steps
         self.time_jump: float = sim_parameters.get_value("dt") * delta_steps
         # set after how many steps the adaptive solver is activated
-        self.trigger_delta_step: int = trigger_adaptive_tc_activation_after_steps
+        self.trigger_time_jump: int = trigger_adaptive_tc_activation_after_steps
 
-    def __build_weak_form(self, u: fenics.Function,
-                          phi_temp: fenics.Function or None = None,
-                          **weak_form_kwargs) -> fenics.Form:
+    def __build_weak_form(self, u: dolfinx.fem.Function,
+                          af_dt: bool = True,
+                          **weak_form_kwargs) -> ufl.Form:
         # assign functions to u
         # fenics.assign(u, [self.af_old, self.c_old, self.mu_old])
-        af, c, mu = fenics.split(u)
+        af, c, mu = ufl.split(u)
         # define test functions
-        v1, v2, v3 = fenics.TestFunctions(self.V)
+        v1, v2, v3 = ufl.TestFunctions(self.V)
         # build total form
-        if phi_temp is None:
+        if af_dt:
             af_form = src.forms.angiogenic_factors_form_dt(af, self.af_old, self.phi, c, v1, self.sim_parameters,
                                                            **weak_form_kwargs)
         else:
-            af_form = src.forms.angiogenic_factors_form_dt(af, self.af_old, phi_temp, c, v1, self.sim_parameters,
+            af_form = src.forms.angiogenic_factors_form_eq(af, self.phi, c, v1, self.sim_parameters,
                                                            **weak_form_kwargs)
         capillaries_form = mocafe.angie.forms.angiogenesis_form_no_proliferation(
             c, self.c_old, mu, self.mu_old, v2, v3, self.sim_parameters, **weak_form_kwargs
@@ -888,215 +1008,177 @@ class RHTimeAdaptiveSimulation(RHTimeSimulation):
         # return form
         return form
 
-    def _test_tip_cell_activation_after_delta_step(self,
-                                                   u_temp: fenics.Function,
-                                                   phi_temp: fenics.Function,
-                                                   phi_exp_temp: fenics.Expression,
-                                                   grad_af_temp: fenics.Function,
-                                                   t: float,
-                                                   time_jump: float):
-        # define bigger dt
-        bigger_dt = time_jump
-        # update tumor dimension
-        phi_exp_temp.t = t + time_jump
-        phi_temp.assign(fenics.interpolate(phi_exp_temp, self.V.sub(0).collapse()))
-        # build weak from for dt = time_jump * dt
-        form = self.__build_weak_form(u_temp, phi_temp=phi_temp, dt=bigger_dt)
-        # get Jacobian
-        J = fenics.derivative(form, u_temp)
-        # define problem
-        problem = PETScProblem(J, form, [])
-        # solve
-        self._solve(problem, u_temp)
-        # check if runtime error occurred
-        if self.runtime_error_occurred:
-            return False
-        # define functions
-        af_temp, c_temp, mu_temp = u_temp.split()
-        self.ge.compute_gradient(af_temp, self.vec_V, grad_af_temp, self.lsp)
-        # check tc_activation
-        tc_activate_after_delta_step = self.tip_cell_manager.test_tip_cell_activation(c_temp,
-                                                                                      af_temp,
-                                                                                      grad_af_temp)
+    # def _test_tip_cell_activation_after_delta_step(self,
+    #                                                u_temp: fenics.Function,
+    #                                                phi_temp: fenics.Function,
+    #                                                phi_exp_temp: fenics.Expression,
+    #                                                grad_af_temp: fenics.Function,
+    #                                                t: float,
+    #                                                time_jump: float):
+    #     # define bigger dt
+    #     bigger_dt = time_jump
+    #     # update tumor dimension
+    #     phi_exp_temp.t = t + time_jump
+    #     phi_temp.assign(fenics.interpolate(phi_exp_temp, self.V.sub(0).collapse()))
+    #     # build weak from for dt = time_jump * dt
+    #     form = self.__build_weak_form(u_temp, phi_temp=phi_temp, dt=bigger_dt)
+    #     # get Jacobian
+    #     J = fenics.derivative(form, u_temp)
+    #     # define problem
+    #     problem = PETScProblem(J, form, [])
+    #     # solve
+    #     self._solve(problem, u_temp)
+    #     # check if runtime error occurred
+    #     if self.runtime_error_occurred:
+    #         return False
+    #     # define functions
+    #     af_temp, c_temp, mu_temp = u_temp.split()
+    #     self.ge.compute_gradient(af_temp, self.vec_V, grad_af_temp, self.lsp)
+    #     # check tc_activation
+    #     tc_activate_after_delta_step = self.tip_cell_manager.test_tip_cell_activation(c_temp,
+    #                                                                                   af_temp,
+    #                                                                                   grad_af_temp)
+    #
+    #     return tc_activate_after_delta_step
 
-        return tc_activate_after_delta_step
-
-    def _find_next_activation_time(self, t: float,
-                                   putative_next_time: float,
-                                   u_temp: fenics.Function,
-                                   phi_temp: fenics.Function,
-                                   phi_exp_temp: fenics.Expression,
-                                   grad_af_temp: fenics.Function) -> float:
-        if abs(putative_next_time - t) <= self.sim_parameters.get_value("dt"):
-            logger.info(f"{self.out_folder_name}:Found next time: {putative_next_time}")
-            return putative_next_time
-        else:
-            # define mid step
-            mid_time = (putative_next_time + t) / 2
-            # define the delta between the current step and the actual step
-            delta_mid_time = mid_time - t
-
-            logger.info(f"{self.out_folder_name}:Checking tip cell activation at mid point: {mid_time}")
-            # solve problem after delta_mid_step
-            tc_activate_at_mid_step = self._test_tip_cell_activation_after_delta_step(u_temp, phi_temp, phi_exp_temp,
-                                                                                      grad_af_temp, t, delta_mid_time)
-            if tc_activate_at_mid_step:
-                return self._find_next_activation_time(t, mid_time, u_temp, phi_temp, phi_exp_temp, grad_af_temp)
-            else:
-                return self._find_next_activation_time(mid_time, putative_next_time, u_temp, phi_temp, phi_exp_temp,
-                                                       grad_af_temp)
+    # def _find_next_activation_time(self, t: float,
+    #                                putative_next_time: float,
+    #                                u_temp: fenics.Function,
+    #                                phi_temp: fenics.Function,
+    #                                phi_exp_temp: fenics.Expression,
+    #                                grad_af_temp: fenics.Function) -> float:
+    #     if abs(putative_next_time - t) <= self.sim_parameters.get_value("dt"):
+    #         logger.info(f"{self.out_folder_name}:Found next time: {putative_next_time}")
+    #         return putative_next_time
+    #     else:
+    #         # define mid step
+    #         mid_time = (putative_next_time + t) / 2
+    #         # define the delta between the current step and the actual step
+    #         delta_mid_time = mid_time - t
+    #
+    #         logger.info(f"{self.out_folder_name}:Checking tip cell activation at mid point: {mid_time}")
+    #         # solve problem after delta_mid_step
+    #         tc_activate_at_mid_step = self._test_tip_cell_activation_after_delta_step(u_temp, phi_temp, phi_exp_temp,
+    #                                                                                   grad_af_temp, t, delta_mid_time)
+    #         if tc_activate_at_mid_step:
+    #             return self._find_next_activation_time(t, mid_time, u_temp, phi_temp, phi_exp_temp, grad_af_temp)
+    #         else:
+    #             return self._find_next_activation_time(mid_time, putative_next_time, u_temp, phi_temp, phi_exp_temp,
+    #                                                    grad_af_temp)
+    def _solve_using_solver(self, solver, u):
+        try:
+            solver.solve(u)
+        except RuntimeError as e:
+            # store error info
+            self.runtime_error_occurred = True
+            self.error_msg = str(e)
+            logger.error(str(e))
 
     def _time_iteration(self):
-        # define weak form
-        logger.info(f"{self.out_folder_name}:Defining weak form...")
-        u = fenics.Function(self.V)
-        form = self.__build_weak_form(u)
+        # define fine_dt and coarse_dt
+        fine_dt = self.sim_parameters.get_value("dt")
+        fine_delta_step = 1
+        coarse_dt = self.time_jump
+        coarse_delta_step = self.delta_steps
 
-        # define problem
-        logger.info(f"{self.out_folder_name}:Defining problem...")
-        # define Jacobian
-        J = fenics.derivative(form, u)
-        # define problem
-        problem = PETScProblem(J, form, [])
+        # define u
+        u = dolfinx.fem.Function(self.V)
+
+        # define fine problem
+        logger.info(f"{self.out_folder_name}:Defining fine problem...")
+        fine_form = self.__build_weak_form(u)                            # weak form
+        fine_problem = dolfinx.fem.petsc.NonlinearProblem(fine_form, u)  # problem
+
+        # define coarse problem
+        logger.info(f"{self.out_folder_name}:Defining coarse problem...")
+        coarse_form = self.__build_weak_form(u, af_dt=False, dt=coarse_dt)    # weak form
+        coarse_problem = dolfinx.fem.petsc.NonlinearProblem(coarse_form, u)     # problem
+
+        # define a solver for each problem
+        fine_problem_solver = NewtonSolver(comm_world, fine_problem)  # set solver
+        coarse_problem_solver = NewtonSolver(comm_world, coarse_problem)
+        for solver in [fine_problem_solver, coarse_problem_solver]:
+            if "ksp_monitor" in self.lsp.keys():
+                solver.report = True  # report iterations
+            # set options for krylov solver
+            ksp = solver.krylov_solver
+            opts = PETSc.Options()
+            option_prefix = ksp.getOptionsPrefix()
+            for o, v in self.lsp.items():
+                opts[f"{option_prefix}{o}"] = v
+            ksp.setFromOptions()
 
         # init time iteration
-        dt = self.sim_parameters.get_value("dt")
-        self.t = dt
-        step = 1
-
-        # define temp phi exp
-        phi_exp_temp = get_growing_RH_expression(self.sim_parameters,
-                                                 self.patient_parameters,
-                                                 self.mesh_parameters,
-                                                 self.ureg,
-                                                 initial_t=self.t,
-                                                 spatial_dimension=3)
-
-        # init count of tip cells
-        tip_cell_count = np.zeros(self.steps)
-        # setup pbar
-        super()._set_pbar(total=self.steps)
+        step = 0                               # time step
+        t = self.t0 + (step * fine_dt)         # time
+        tip_cell_count = np.zeros(self.steps)  # tip cell number in time
+        super()._set_pbar(total=self.steps)    # setup pbar
 
         # log
         logger.info(f"{self.out_folder_name}:Starting time iteration...")
         # iterate in time
         while step < self.steps + 1:
-            if (step < 4) or (step > 100):
-                # activate tip cells
-                self.tip_cell_manager.activate_tip_cell(self.c_old, self.af_old, self.grad_af_old, step)
+            # activate tip cells
+            self.tip_cell_manager.activate_tip_cell(self.c_old, self.af_old, self.grad_af_old, step)
 
-                # revert tip cells
-                self.tip_cell_manager.revert_tip_cells(self.af_old, self.grad_af_old)
+            # revert tip cells
+            self.tip_cell_manager.revert_tip_cells(self.af_old, self.grad_af_old)
 
-                # move tip cells
-                self.tip_cell_manager.move_tip_cells(self.c_old, self.af_old, self.grad_af_old)
+            # move tip cells
+            self.tip_cell_manager.move_tip_cells(self.c_old, self.af_old, self.grad_af_old)
 
-                # store tip cells in fenics function and json file
-                self.t_c_f_function.assign(self.tip_cell_manager.get_latest_tip_cell_function())
-                self.tip_cell_manager.save_incremental_tip_cells(f"{self.report_folder}/incremental_tipcells.json", step)
+            # store tip cells in fenics function and json file
+            self.t_c_f_function.assign(self.tip_cell_manager.get_latest_tip_cell_function())
+            self.tip_cell_manager.save_incremental_tip_cells(f"{self.report_folder}/incremental_tipcells.json", step)
 
-                # store tip cell count in array
-                current_tip_cell_count = len(self.tip_cell_manager.get_global_tip_cells_list())
-                tip_cell_count[step - 1] = current_tip_cell_count
+            # store tip cell count in array
+            current_tip_cell_count = len(self.tip_cell_manager.get_global_tip_cells_list())
+            tip_cell_count[step] = current_tip_cell_count
 
-            if step > self.trigger_delta_step and \
-               np.all(tip_cell_count[step+1-self.trigger_delta_step:step+1] == 0):
-                logger.info(f"{self.out_folder_name}:Entered adaptive time iteration")
-
-                # 1. Proceed solving the problem after the time_jump
-                putative_next_time = self.t + self.time_jump             # init putative next time
-                u_temp = fenics.Function(self.V)                         # init u_temp
-                grad_af_temp = fenics.Function(self.vec_V)               # init grad_af_temp
-                phi_temp = fenics.Function(self.V.sub(0).collapse())     # init phi_temp
-                phi_exp_temp = get_growing_RH_expression(self.sim_parameters,
-                                                         self.patient_parameters,
-                                                         self.mesh_parameters,
-                                                         self.ureg,
-                                                         initial_t=self.t,
-                                                         spatial_dimension=3)
-                # 2. Check if tc activate after time_jump
-                logger.info(f"{self.out_folder_name}:Checking tip cell activation after time jump "
-                            f"(sim time: {self.t})")
-
-                tc_activate_at_putative_next_time = self._test_tip_cell_activation_after_delta_step(
-                    u_temp, phi_temp, phi_exp_temp, grad_af_temp, step, self.time_jump
-                )
-                logger.info(f"{self.out_folder_name}:Checking tip cell activation after time jump: "
-                            f"(sim time: {self.t}): {tc_activate_at_putative_next_time}")
-                # if runtime error occurred, exit
-                if self.runtime_error_occurred:
-                    return 1
-
-                # 3. If tc activated at next step, find the actual next step. Else, set the putative next step as
-                # the next step
-                if tc_activate_at_putative_next_time:
-                    next_time = self._find_next_activation_time(self.t, putative_next_time, u_temp, phi_temp,
-                                                                phi_exp_temp, grad_af_temp)
-                else:
-                    next_time = putative_next_time
-                # if runtime error occurred, exit
-                if self.runtime_error_occurred:
-                    return 1
-
-                # 4. Update status
-                logger.info(f"{self.out_folder_name}:Updating simulation status after adaptive time stepping")
-                # compute delta in terms of steps
-                delta_step = int(np.round(next_time - self.t))
+            # Check if in all of the latest "trigger_time_jump" steps the number of tip cells is 0
+            # If yes, proceed faster in time with coarse problem.
+            # Else, go to traditional problem
+            if step > self.trigger_time_jump and \
+                    np.all(tip_cell_count[step + 1 - self.trigger_time_jump:step + 1] == 0):
+                logger.info(f"{self.out_folder_name}: (step {step}) Solving coarse problem...")
+                self._solve_using_solver(coarse_problem_solver, u)
                 # update time
-                self.t = next_time
-                # update phi
-                self.phi.assign(phi_temp)
-                # update all functions
-                fenics.assign([self.af_old, self.c_old, self.mu_old], u_temp)
-                fenics.assign(u, [self.af_old, self.c_old, self.mu_old])
-                fenics.assign(self.grad_af_old, grad_af_temp)
-                # update pbar
-                self.pbar.update(delta_step)
-                # Update sim step
-                step += delta_step
-                # write functions
-                if ((step % self.save_rate == 0)
-                        or (step == self.steps)
-                        or self.runtime_error_occurred
-                        or tc_activate_at_putative_next_time):
-                    self._write_files(step)
-
-                # 5. update tip cells incremental file
-                with open(f"{self.report_folder}/incremental_tipcells.json", "r+") as itc_json:
-                    itc_dict = json.load(itc_json)
-                    last_saved_step = list(itc_dict.keys())[-1]
-                    last_saved_step = int(last_saved_step.replace("step_", ""))
-                    for missing_step in range(last_saved_step, step):
-                        itc_dict[f"step_{missing_step}"] = {}
-                    json.dump(itc_dict, itc_json)
-
-                logger.info(f"{self.out_folder_name}:Exiting adaptive time stepping")
+                t += coarse_dt                          # time
+                step += coarse_delta_step               # step
+                latest_delta_step = coarse_delta_step   # delta step (to update pbar)
             else:
-                # solve
-                self._solve(problem, u)
-
-                # if error occurred, stop iteration
-                if self.runtime_error_occurred:
-                    return 1
-
-                # assign to old
-                fenics.assign([self.af_old, self.c_old, self.mu_old], u)
-                # assign new value to grad_af_old
-                self.ge.compute_gradient(self.af_old, self.vec_V, self.grad_af_old, self.lsp)
-                # assign new value to phi
-                self.phi_expression.t = self.t  # update time
-                self.phi.assign(fenics.interpolate(self.phi_expression, self.V.sub(0).collapse()))
-
-                # save
-                if (step % self.save_rate == 0) or (step == self.steps) or self.runtime_error_occurred:
-                    self._write_files(step)
-
-                # update progress bar
-                self.pbar.update(1)
-
+                logger.info(f"{self.out_folder_name}: (step {step}) Solving fine problem...")
+                self._solve_using_solver(fine_problem_solver, u)
                 # update time
-                self.t += dt
-                step += 1
+                t += fine_dt  # time
+                step += fine_delta_step  # step
+                latest_delta_step = fine_delta_step  # delta step (to update pbar)
+
+            # assign to old
+            new_af, new_c, new_mu = u.split()
+            self.af_old.interpolate(new_af)
+            self.af_old.x.scatter_forward()
+            self.c_old.interpolate(new_c)
+            self.c_old.x.scatter_forward()
+            self.af_old.interpolate(new_mu)
+            self.af_old.x.scatter_forward()
+            # assign new value to grad_af_old
+            self.ge.compute_gradient(self.af_old, self.vec_V, self.grad_af_old, self.lsp)
+            # assign new value to phi
+            self.phi_expression.update_time(t)
+            self.phi.interpolate(self.phi_expression.eval)
+            self.phi.x.scatter_forward()
+
+            # save
+            if (step % self.save_rate == 0) or (step == self.steps) or self.runtime_error_occurred:
+                self._write_files(step)
+
+            # if runtime error occurred exit
+            if self.runtime_error_occurred:
+                return 1
+
+            # update progress bar
+            self.pbar.update(latest_delta_step)
 
         return 0
 
@@ -1180,9 +1262,6 @@ class RHTestTipCellActivation(RHSimulation):
                 tip_cell_activation_df.to_csv(f"{self.data_folder}/tipcell_activation.csv")
                 # update pbar
                 self.pbar.update(1)
-
-            # wait for all procs
-            comm_world.Barrier()
 
         self._end_simulation()  # conclude time iteration
 
