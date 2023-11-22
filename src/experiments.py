@@ -1,10 +1,13 @@
 import sys
 import json
 import logging
+import time
+from pathlib import Path
 import pandas as pd
 import numpy as np
 from mocafe.fenut.parameters import Parameters
-from src.simulation import run_simulation, test_tip_cell_activation, RHTimeAdaptiveSimulation
+from mpi4py import MPI
+from src.simulation import run_simulation, test_tip_cell_activation, RHTimeAdaptiveSimulation, RHTimeSimulation
 
 
 # set up logger
@@ -327,3 +330,186 @@ def test_different_tipe_steps_patient1():
                        recompute_c0=True,
                        write_checkpoints=False,
                        save_distributed_files_to="/local/frapra/3drh")
+
+
+def test_convergence_1_step():
+    sim_parameters, slurm_job_id, patients_parameters = preamble()
+
+    patient1_parameters = patients_parameters["patient1"]
+
+    sim = RHTimeSimulation(spatial_dimension=3,
+                           sim_parameters=sim_parameters,
+                           patient_parameters=patient1_parameters,
+                           steps=1,
+                           save_rate=1,
+                           out_folder_name="dolfinx_test_convergence_for_preconditioners_gmres",
+                           out_folder_mode=None,
+                           sim_rationale="Testing",
+                           slurm_job_id=slurm_job_id,
+                           write_checkpoints=False,
+                           save_distributed_files_to="/local/frapra/3drh")
+    # setup the convergence test
+    sim.setup_convergence_test()
+    # setup list for storing performance
+    performance_dicts = []
+    # --------------------------------------------------------------------------------------------------------------- #
+    # Iterative solvers                                                                                               #
+    # --------------------------------------------------------------------------------------------------------------- #
+    # create list of solver and preconditioners
+    solver_list = ["cg", "gmres"]
+    pc_type_list = ["jacobi", "bjacobi", "sor", "asm", "gasm", "gamg"]
+    for solver in solver_list:
+        for pc in pc_type_list:
+            for use_mumps in [True, False]:
+                # log
+                if use_mumps:
+                    logger.info(f"Testing solver {solver} with pc {pc} with mumps")
+
+                else:
+                    logger.info(f"Testing solver {solver} with pc {pc} NO mumps")
+
+                # set linear solver parameters
+                if use_mumps:
+                    lsp = {
+                        "ksp_type": solver,
+                        "pc_type": pc,
+                        "ksp_monitor": None,
+                        "pc_factor_mat_solver_type": "mumps"
+                    }
+                else:
+                    lsp = {
+                        "ksp_type": solver,
+                        "pc_type": pc,
+                        "ksp_monitor": None
+                    }
+                sim.lsp = lsp
+
+                # time solution
+                time0 = time.perf_counter()
+                sim.test_convergence()
+                tot_time = time.perf_counter() - time0
+
+                # check if error occurred
+                error = sim.runtime_error_occurred
+                error_msg = sim.error_msg
+
+                # build performance dict
+                perf_dict = {
+                    "solver": "gmres",
+                    "pc": pc,
+                    "mumps": use_mumps,
+                    "time": tot_time,
+                    "error": error,
+                    "error_msg": error_msg
+                }
+                # append dict to list
+                performance_dicts.append(perf_dict)
+                df = pd.DataFrame(performance_dicts)
+                if MPI.COMM_WORLD.rank == 0:
+                    df.to_csv(sim.data_folder / Path("performance.csv"))
+
+                # reset runtime error and error msg
+                sim.runtime_error_occurred = False
+                sim.error_msg = None
+
+    # create a list of solver and preconditioners using hypre
+    solver_list = ["cg", "gmres"]
+    pc_type_list = ["hypre"]
+    hypre_type_list = ["euclid", "pilut", "parasails", "boomeramg"]
+    for solver in solver_list:
+        for pc in pc_type_list:
+            for hypre_type in hypre_type_list:
+                # log and create configuration
+                logger.info(f"Testing solver {solver} with hypre (type {hypre_type})")
+                lsp = {
+                    "ksp_type": solver,
+                    "pc_type": pc,
+                    "ksp_monitor": None,
+                    "pc_hypre_type": hypre_type
+                }
+                sim.lsp = lsp
+
+                # time solution
+                time0 = time.perf_counter()
+                sim.test_convergence()
+                tot_time = time.perf_counter() - time0
+
+                # check if error occurred
+                error = sim.runtime_error_occurred
+                error_msg = sim.error_msg
+
+                # build performance dict
+                perf_dict = {
+                    "solver": "gmres",
+                    "pc": f"{pc} (type {hypre_type})",
+                    "mumps": False,
+                    "time": tot_time,
+                    "error": error,
+                    "error_msg": error_msg
+                }
+                # append dict to list
+                performance_dicts.append(perf_dict)
+                df = pd.DataFrame(performance_dicts)
+                if MPI.COMM_WORLD.rank == 0:
+                    df.to_csv(sim.data_folder / Path("performance.csv"))
+
+                # reset runtime error and error msg
+                sim.runtime_error_occurred = False
+                sim.error_msg = None
+
+    # --------------------------------------------------------------------------------------------------------------- #
+    # Direct solvers                                                                                                  #
+    # --------------------------------------------------------------------------------------------------------------- #
+    direct_solver_list = ["lu", "cholesky"]
+    for ds in direct_solver_list:
+        for use_mumps in [True, False]:
+            # log
+            if use_mumps:
+                logger.info(f"Testing direct solver {ds} with mumps")
+
+            else:
+                logger.info(f"Testing direct solver {ds} with mumps NO mumps")
+
+            # set linear solver parameters
+            if use_mumps:
+                lsp = {
+                    "ksp_type": "preonly",
+                    "pc_type": ds,
+                    "ksp_monitor": None,
+                    "pc_factor_mat_solver_type": "mumps"
+                }
+            else:
+                lsp = {
+                    "ksp_type": "preonly",
+                    "pc_type": ds,
+                    "ksp_monitor": None,
+                }
+            sim.lsp = lsp
+
+            # time solution
+            time0 = time.perf_counter()
+            sim.test_convergence()
+            tot_time = time.perf_counter() - time0
+
+            # check if error occurred
+            error = sim.runtime_error_occurred
+            error_msg = sim.error_msg
+
+            # build performance dict
+            perf_dict = {
+                "solver": "preonly",
+                "pc": ds,
+                "mumps": use_mumps,
+                "time": tot_time,
+                "error": error,
+                "error_msg": error_msg
+            }
+            # append dict to list
+            performance_dicts.append(perf_dict)
+            df = pd.DataFrame(performance_dicts)
+            if MPI.COMM_WORLD.rank == 0:
+                df.to_csv(sim.data_folder / Path("performance.csv"))
+
+            # reset runtime error and error msg
+            sim.runtime_error_occurred = False
+            sim.error_msg = None

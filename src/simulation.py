@@ -29,6 +29,7 @@ from src.ioutils import (read_parameters, write_parameters, dump_json, load_json
 from src.expressions import RHEllipsoid, VesselReconstruction
 from src.simulation2d import compute_2d_mesh_for_patient
 from src.simulation3d import get_3d_mesh_for_patient
+from src.petscutils import NonlinearPDE_SNESProblem
 
 
 # MPI variables
@@ -242,7 +243,7 @@ class RHSimulation:
         self.patient_parameters: Dict = patient_parameters  # patient parameters
         self.lsp = {
             "ksp_type": "gmres",
-            "pc_type": "gamg",
+            "pc_type": "asm",
             "ksp_monitor": None}  # linear solver parameters
 
         # proprieties
@@ -338,6 +339,7 @@ class RHSimulation:
         self.mesh_parameters = mesh_parameters
 
     def _spatial_discretization(self):
+        logger.info(f"Generating spatial discretization")
         self.V = fu.get_mixed_function_space(self.mesh, 3)
         self.vec_V = dolfinx.fem.FunctionSpace(self.mesh, ufl.VectorElement("P", self.mesh.ufl_cell(), 1))
 
@@ -598,6 +600,28 @@ class RHTimeSimulation(RHSimulation):
 
         return self.runtime_error_occurred
 
+    def setup_convergence_test(self):
+        self._check_simulation_properties()  # Check class proprieties. Return error if something does not work.
+
+        self._sim_mkdir()  # create all simulation folders
+
+        self._fill_reproduce_folder()  # store current script in reproduce folder to keep track of the code
+
+        self._generate_mesh()  # generate mesh
+
+        self._spatial_discretization()  # initialize function space
+
+        self._generate_initial_conditions()  # generate initial condition
+
+        # write initial conditions
+        # self._write_files(0)
+
+    def test_convergence(self, lsp: Dict = None):
+        if lsp is not None:
+            self.lsp = lsp
+
+        self._time_iteration(test_convergence=True)
+
     def _check_simulation_properties(self):
         # check base conditions
         super()._check_simulation_properties()
@@ -723,20 +747,11 @@ class RHTimeSimulation(RHSimulation):
         logger.info(f"Writing tipcells_pvd... ")
         self.tipcells_file.write_function(self.t_c_f_function, t)
 
-    def _solve(self, u: dolfinx.fem.Function):
-        try:
-            self.solver.solve(u)
-        except RuntimeError as e:
-            # store error info
-            self.runtime_error_occurred = True
-            self.error_msg = str(e)
-            logger.error(str(e))
-
-    def _time_iteration(self):
+    def _time_iteration(self, test_convergence: bool = False):
         # define weak form
         logger.info(f"{self.out_folder_name}:Defining weak form...")
         u = dolfinx.fem.Function(self.V)
-        # split u
+        # assign u_old to u
         af, c, mu = ufl.split(u)
         # define test functions
         v1, v2, v3 = ufl.TestFunctions(self.V)
@@ -752,15 +767,13 @@ class RHTimeSimulation(RHSimulation):
 
         # define solver
         self.solver = NewtonSolver(comm_world, problem)
-        if "ksp_monitor" in self.lsp.keys():
-            self.solver.report = True  # report iterations
+        self.solver.report = True  # report iterations
         # set options for krylov solver
-        ksp = self.solver.krylov_solver
         opts = PETSc.Options()
-        option_prefix = ksp.getOptionsPrefix()
+        option_prefix = self.solver.krylov_solver.getOptionsPrefix()
         for o, v in self.lsp.items():
             opts[f"{option_prefix}{o}"] = v
-        ksp.setFromOptions()
+        self.solver.krylov_solver.setFromOptions()
 
         # init time iteration
         t = self.t0
@@ -785,14 +798,21 @@ class RHTimeSimulation(RHSimulation):
             self.tip_cell_manager.move_tip_cells(self.c_old, self.af_old, self.grad_af_old)
 
             # store tip cells in fenics function and json file
-            self.t_c_f_function.assign(self.tip_cell_manager.get_latest_tip_cell_function())
+            self.t_c_f_function = self.tip_cell_manager.get_latest_tip_cell_function()
+            self.t_c_f_function.x.scatter_forward()
             self.tip_cell_manager.save_incremental_tip_cells(f"{self.report_folder}/incremental_tipcells.json", step)
 
             # solve
-            self._solve(u)
+            try:
+                self.solver.solve(u)
+            except RuntimeError as e:
+                # store error info
+                self.runtime_error_occurred = True
+                self.error_msg = str(e)
+                logger.error(str(e))
 
             # if error occurred, stop iteration
-            if self.runtime_error_occurred:
+            if self.runtime_error_occurred or test_convergence:
                 break
 
             # assign to old
@@ -1074,7 +1094,7 @@ class RHTimeAdaptiveSimulation(RHTimeSimulation):
             self.error_msg = str(e)
             logger.error(str(e))
 
-    def _time_iteration(self):
+    def _time_iteration(self, test_convergence: bool = False):
         # define fine_dt and coarse_dt
         fine_dt = self.sim_parameters.get_value("dt")
         fine_delta_step = 1
