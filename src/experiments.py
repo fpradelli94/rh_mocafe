@@ -39,6 +39,25 @@ def preamble():
     return sim_parameters, slurm_job_id, patients_parameters
 
 
+def test_2d():
+    # preamble
+    sim_parameters, slurm_job_id, patients_parameters = preamble()
+    # get patient 1 parametes
+    patient1_parameters = patients_parameters["patient1"]
+    # run simulation for 3 steps
+    run_simulation(spatial_dimension=2,
+                   sim_parameters=sim_parameters,
+                   patient_parameters=patient1_parameters,
+                   steps=3,
+                   save_rate=1,
+                   out_folder_name="test_2d",
+                   sim_rationale="2d test",
+                   recompute_mesh=True,
+                   recompute_c0=True,
+                   write_checkpoints=False,
+                   save_distributed_files_to="test_2d")
+
+
 def compute_initial_condition_for_each_patient():
     """
     Compute initial condition for each patient
