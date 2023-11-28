@@ -35,13 +35,13 @@ def compute_2d_mesh_for_patient(
                              * local_ureg(patient_parameters["simulation_box"]["Ly"]["mu"])
 
     # convert Lx and Ly to sau
-    Lx: pint.Quantity = Lx_real.to("sau")
-    Ly: pint.Quantity = Ly_real.to("sau")
+    Lx: float = Lx_real.to("sau").magnitude
+    Ly: float = Ly_real.to("sau").magnitude
 
     # compute nx and ny based on R_c size
     R_c: float = parameters_df.loc['R_c', 'sim_value']
-    nx: int = int(np.floor(Lx.magnitude / (R_c / 2)))  # each element should be about R_c / 2
-    ny: int = int(np.floor(Ly.magnitude / (R_c / 2)))
+    nx: int = int(np.floor(Lx / (R_c / 2)))  # each element should be about R_c / 2
+    ny: int = int(np.floor(Ly / (R_c / 2)))
 
     # define mesh
     mesh = dolfinx.mesh.create_rectangle(comm=MPI.COMM_WORLD,
@@ -66,8 +66,8 @@ def compute_2d_mesh_for_patient(
                     Ly_real.units,
                     None,
                     None],
-        "sim_value": [Lx.magnitude,
-                      Ly.magnitude,
+        "sim_value": [Lx,
+                      Ly,
                       nx,
                       ny],
         "sim_um": ["sau",
