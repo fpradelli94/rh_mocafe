@@ -29,7 +29,6 @@ from src.ioutils import (read_parameters, write_parameters, dump_json, load_json
 from src.expressions import RHEllipsoid, VesselReconstruction
 from src.simulation2d import compute_2d_mesh_for_patient
 from src.simulation3d import get_3d_mesh_for_patient
-from src.petscutils import NonlinearPDE_SNESProblem
 
 
 # MPI variables
@@ -42,8 +41,8 @@ logger = logging.getLogger(__name__)
 
 def get_ureg_with_arbitrary_units(sim_parameters: Parameters):
     """
-            Generate a UnitRegistry with the arbitrary units as defined in the Simulation Parameters
-            """
+    Generate a UnitRegistry with the arbitrary units as defined in the Simulation Parameters
+    """
     # initialize unit registry
     local_ureg = UnitRegistry()
 
@@ -342,29 +341,24 @@ class RHSimulation:
         logger.info(f"Generating spatial discretization")
         self.V = fu.get_mixed_function_space(self.mesh, 3)
         self.vec_V = dolfinx.fem.FunctionSpace(self.mesh, ufl.VectorElement("P", self.mesh.ufl_cell(), 1))
+        self.subV0_collapsed, self.collapsed_to_V = self.V.sub(0).collapse()
+
+    def _generate_u_old(self):
+        logger.info(f"Initializing u old... ")
+        self.u_old = dolfinx.fem.Function(self.V)
+        self.af_old, self.c_old, self.mu_old = self.u_old.split()
 
     def _generate_sim_parameters_independent_initial_conditions(self):
         """
         Generate initial conditions not depending on from the simulaion parameters
         """
-        # get collapsed subspace
-        subV_collapsed, _ = self.V.sub(0).collapse()
-
         # capillaries
-        self.c_old = dolfinx.fem.Function(subV_collapsed)
         get_c0(self.spatial_dimension, self.c_old, self.patient_parameters, self.mesh_parameters, self.cache_c0_xdmf,
                self.recompute_c0, self.write_checkpoints)
-        # name c_old
-        self.c_old.name = "c"
-
-        # auxiliary fun for capillaries, initially set to 0
-        logger.info(f"{self.out_folder_name}:Computing mu0...")
-        self.mu_old = dolfinx.fem.Function(subV_collapsed)
 
         # t_c_f_function (dynamic tip cell position)
         logger.info(f"{self.out_folder_name}:Computing t_c_f_function...")
-        self.t_c_f_function = dolfinx.fem.Function(subV_collapsed)
-        self.t_c_f_function.name = "tcf"
+        self.t_c_f_function = dolfinx.fem.Function(self.subV0_collapsed)
 
         # define initial time
         self.t0 = 0
@@ -388,20 +382,16 @@ class RHSimulation:
         self.phi = dolfinx.fem.Function(subV_collapsed)
         self.phi.interpolate(self.phi_expression.eval)
         self.phi.x.scatter_forward()
-        self.phi.name = "phi"
 
         # af
         logger.info(f"{self.out_folder_name}:Computing af0...")
-        self.af_old = dolfinx.fem.Function(subV_collapsed)
         self.__compute_af_0(sim_parameters)
-        self.af_old.name = "af"
 
         # af gradient
         logger.info(f"{self.out_folder_name}:Computing grad_af0...")
         self.ge = GradientEvaluator()
         self.grad_af_old = dolfinx.fem.Function(self.vec_V)
         self.ge.compute_gradient(self.af_old, self.vec_V, self.grad_af_old, self.lsp)
-        self.grad_af_old.name = "grad_af"
 
         # define tip cell manager
         self.tip_cell_manager = TipCellManager(self.mesh, self.sim_parameters)
@@ -416,11 +406,10 @@ class RHSimulation:
         # manage none dict
         if options is None:
             options = self.lsp
-        # get af variable
-        subV_collapsed, _ = self.V.sub(0).collapse()
-        af = ufl.TrialFunction(subV_collapsed)
+        # get trial function
+        af = ufl.TrialFunction(self.subV0_collapsed)
         # get test function
-        v = ufl.TestFunction(subV_collapsed)
+        v = ufl.TestFunction(self.subV0_collapsed)
         # built equilibrium form for af
         af_form = src.forms.angiogenic_factors_form_eq(af, self.phi, self.c_old, v, sim_parameters)
         af_form_a = dolfinx.fem.form(ufl.lhs(af_form))
@@ -442,7 +431,10 @@ class RHSimulation:
         dolfinx.fem.petsc.apply_lifting(b, [af_form_a], [[]])
         b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
         # solve
-        ksp.solve(b, self.af_old.vector)
+        sol = dolfinx.fem.Function(self.subV0_collapsed)
+        ksp.solve(b, sol.vector)
+        # interpolate solution on af_old
+        self.af_old.interpolate(sol)
         self.af_old.x.scatter_forward()
 
         # destroy object (workaround for issue: https://github.com/FEniCS/dolfinx/issues/2559)
@@ -564,7 +556,7 @@ class RHTimeSimulation(RHSimulation):
         else:
             # specific XDMF files
             self.c_file, self.af_file, self.grad_af_file, self.tipcells_file, self.phi_file = \
-                [dolfinx.io.XDMFile(comm_world, str(self.data_folder / Path(f"{fn}.xdmf")), "w")
+                [dolfinx.io.XDMFFile(comm_world, str(self.data_folder / Path(f"{fn}.xdmf")), "w")
                  for fn in file_names]
 
         self.__resume_files_dict: Dict or None = None  # dictionary containing files to resume
@@ -592,7 +584,7 @@ class RHTimeSimulation(RHSimulation):
             self._generate_initial_conditions()  # generate initial condition
 
         # write initial conditions
-        self._write_files(0)
+        self._write_files(0, write_mesh=True)
 
         self._time_iteration()  # run simulation in time
 
@@ -647,6 +639,8 @@ class RHTimeSimulation(RHSimulation):
         # self.mesh_parameters = read_parameters(self.__resume_files_dict["mesh_parameters.csv"])
 
     def _generate_initial_conditions(self):
+        # generate u_old
+        super()._generate_u_old()
         # generate initial conditions independent of sim parameters
         super()._generate_sim_parameters_independent_initial_conditions()
         # generate initial conditions dependent from sim parameters
@@ -721,43 +715,37 @@ class RHTimeSimulation(RHSimulation):
         # self.t0 = last_step
 
     def _write_files(self, t: int, write_mesh: bool = False):
-        # write mesh
-        if write_mesh:
-            logger.info(f"Starting writing Mesh")
-            logger.info(f"Writing af_pvd... ")
-            self.af_file.write_mesh(self.mesh)
-            logger.info(f"Writing c_pvd... ")
-            self.c_file.write_mesh(self.mesh)
-            logger.info(f"Writing grad_af_pvd... ")
-            self.grad_af_file.write_mesh(self.mesh)
-            logger.info(f"Writing phi_pvd... ")
-            self.phi_file.write_mesh(self.mesh)
-            logger.info(f"Writing tipcells_pvd... ")
-            self.tipcells_file.write_mesh(self.mesh)
-        # write functions
-        logger.info(f"Starting writing of PVD files ")
-        logger.info(f"Writing af_pvd... ")
-        self.af_file.write_function(self.af_old, t)
-        logger.info(f"Writing c_pvd... ")
-        self.c_file.write_function(self.c_old, t)
-        logger.info(f"Writing grad_af_pvd... ")
-        self.grad_af_file.write_function(self.grad_af_old, t)
-        logger.info(f"Writing phi_pvd... ")
-        self.phi_file.write_function(self.phi, t)
-        logger.info(f"Writing tipcells_pvd... ")
-        self.tipcells_file.write_function(self.t_c_f_function, t)
+
+        for fun, name, f_file in zip([self.af_old, self.c_old, self.grad_af_old, self.phi, self.t_c_f_function],
+                                     ["af", "c", "grad_af", "phi", "tipcells"],
+                                     [self.af_file, self.c_file, self.grad_af_file, self.phi_file, self.tipcells_file]):
+            # log
+            logger.info(f"Writing {name} file...")
+            # if necessary, write mesh
+            if write_mesh and (not self.save_distributed_files):
+                f_file.write_mesh(self.mesh)
+            # write function
+            fun.name = name
+            if self.save_distributed_files and self.V.contains(fun.function_space):
+                # for pvd files, save collapsed function (if the function is a sub-function of u)
+                collapsed_function = fun.collapse()
+                collapsed_function.name = name
+                f_file.write_function(collapsed_function, t)
+            else:
+                f_file.write_function(fun, t)
 
     def _time_iteration(self, test_convergence: bool = False):
         # define weak form
         logger.info(f"{self.out_folder_name}:Defining weak form...")
         u = dolfinx.fem.Function(self.V)
+        u.x.array[:] = self.u_old.x.array
         # assign u_old to u
         af, c, mu = ufl.split(u)
         # define test functions
         v1, v2, v3 = ufl.TestFunctions(self.V)
         # build total form
         af_form = src.forms.angiogenic_factors_form_dt(af, self.af_old, self.phi, c, v1, self.sim_parameters)
-        capillaries_form = mocafe.angie.forms.angiogenesis_form_no_proliferation(
+        capillaries_form = src.forms.angiogenesis_form_no_proliferation(
             c, self.c_old, mu, self.mu_old, v2, v3, self.sim_parameters)
         form = af_form + capillaries_form
 
@@ -816,13 +804,9 @@ class RHTimeSimulation(RHSimulation):
                 break
 
             # assign to old
-            new_af, new_c, new_mu = u.split()
-            self.af_old.interpolate(new_af)
-            self.af_old.x.scatter_forward()
-            self.c_old.interpolate(new_c)
-            self.c_old.x.scatter_forward()
-            self.af_old.interpolate(new_mu)
-            self.af_old.x.scatter_forward()
+            self.u_old.x.array[:] = u.x.array
+            self.u_old.x.scatter_forward()
+            self.af_old, self.c_old, self.mu_old = self.u_old.split()
             # assign new value to grad_af_old
             self.ge.compute_gradient(self.af_old, self.vec_V, self.grad_af_old, self.lsp)
             # assign new value to phi
