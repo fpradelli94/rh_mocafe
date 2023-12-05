@@ -2,16 +2,30 @@ import sys
 import json
 import logging
 import time
+import argparse
 from pathlib import Path
 import pandas as pd
 import numpy as np
 from mocafe.fenut.parameters import Parameters
 from mpi4py import MPI
-from src.simulation import run_simulation, test_tip_cell_activation, RHTimeAdaptiveSimulation, RHTimeSimulation
+from src.simulation import run_simulation, test_tip_cell_activation, RHAdaptiveSimulation, RHTimeSimulation
 
 
 # set up logger
 logger = logging.getLogger(__name__)
+
+
+def cli():
+    parser = argparse.ArgumentParser(description="Simple CLI for RH simulations")
+    # add slurm_job_id
+    parser.add_argument("-slurm_job_id",
+                        type=int,
+                        help="Slurm job ID for the simulation")
+    # add flag for test timulation
+    parser.add_argument("-test_2d",
+                        action="store_true",
+                        help="Run the simulation in 2d to check if everything runs smoothly")
+    return parser.parse_args()
 
 
 def preamble():
@@ -23,27 +37,30 @@ def preamble():
     standard_parameters_df = pd.read_csv(parameters_csv, index_col="name")
     sim_parameters = Parameters(standard_parameters_df)
 
-    # get slurm job id, if any
-    if "-slurm_job_id" in sys.argv:
-        try:
-            slurm_job_id = int(sys.argv[sys.argv.index("-slurm_job_id") + 1])
-        except IndexError:
-            raise IndexError("slurm_job_id not specified. Found -slurm_job_id not followed by an actual id.")
-    else:
-        slurm_job_id = None
+    # get cli args, if any
+    args = cli()
 
     # load patient parameters
     with open("input_patients_data/patients_parameters.json", "r") as infile:
         patients_parameters = json.load(infile)
 
-    return sim_parameters, slurm_job_id, patients_parameters
+    if args.test_2d:
+        spatial_dimension = 2
+        distributed_data_folder = "temp"
+    else:
+        spatial_dimension = 3
+        distributed_data_folder = "/local/frapra/3drh"
+
+    return sim_parameters, patients_parameters, args.slurm_job_id, spatial_dimension, distributed_data_folder
 
 
 def test_2d():
     # preamble
-    sim_parameters, slurm_job_id, patients_parameters = preamble()
+    sim_parameters, patients_parameters, _, _, _ = preamble()
+
     # get patient 1 parametes
     patient1_parameters = patients_parameters["patient1"]
+
     # run simulation for 3 steps
     run_simulation(spatial_dimension=2,
                    sim_parameters=sim_parameters,
@@ -63,7 +80,7 @@ def compute_initial_condition_for_each_patient():
     Compute initial condition for each patient
     """
     # preamble
-    sim_parameters, slurm_job_id, patients_parameters = preamble()
+    sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, distributed_data_folder = preamble()
 
     # For each patient, compute initial condition
     for patient_number in [0, 1, 2]:
@@ -72,7 +89,7 @@ def compute_initial_condition_for_each_patient():
         current_patient_parameter = patients_parameters[f"patient{patient_number}"]  # load patient params
 
         # run simulation
-        run_simulation(spatial_dimension=3,
+        run_simulation(spatial_dimension=spatial_dimension,
                        sim_parameters=sim_parameters,
                        patient_parameters=current_patient_parameter,
                        steps=0,
@@ -83,7 +100,7 @@ def compute_initial_condition_for_each_patient():
                        recompute_mesh=True,
                        recompute_c0=True,
                        write_checkpoints=False,
-                       save_distributed_files_to="/local/frapra/3drh")
+                       save_distributed_files_to=distributed_data_folder)
 
 
 def check_tip_cell_activation_for_each_patient():
@@ -91,7 +108,7 @@ def check_tip_cell_activation_for_each_patient():
 
     """
     # preamble
-    sim_parameters, slurm_job_id, patients_parameters = preamble()
+    sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, _ = preamble()
 
     # get sim parameters dataframe
     sim_parameters_df = sim_parameters.as_dataframe()
@@ -120,7 +137,7 @@ def check_tip_cell_activation_for_each_patient():
 
         current_patient_parameter = patients_parameters[f"patient{patient_number}"]  # load patient params
 
-        test_tip_cell_activation(spatial_dimension=3,
+        test_tip_cell_activation(spatial_dimension=spatial_dimension,
                                  standard_sim_parameters=sim_parameters,
                                  patient_parameters=current_patient_parameter,
                                  out_folder_name=f"dolfinx_patient{patient_number}_tip-cell-activation",
@@ -130,12 +147,13 @@ def check_tip_cell_activation_for_each_patient():
                                  tdf_i=tdf_i_range,
                                  V_pT_af=V_pT_af_range,
                                  V_uc_af=V_uc_af_range,
-                                 T_c=T_c_range)
+                                 T_c=T_c_range,
+                                 write_checkpoints=False)
 
 
 def tip_cell_activation_patient1():
     # preamble
-    sim_parameters, slurm_job_id, patients_parameters = preamble()
+    sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, _ = preamble()
 
     # get sim parameters dataframe
     sim_parameters_df = sim_parameters.as_dataframe()
@@ -148,7 +166,7 @@ def tip_cell_activation_patient1():
                      2.32]  # got from older tip cell activation
 
     # Test tip cell activation
-    test_tip_cell_activation(spatial_dimension=3,
+    test_tip_cell_activation(spatial_dimension=spatial_dimension,
                              standard_sim_parameters=sim_parameters,
                              patient_parameters=patients_parameters["patient1"],
                              out_folder_name=f"dolfinx_patient1_tip-cell-activation",
@@ -163,7 +181,7 @@ def tip_cell_activation_patient1():
 
 def patient1_vascular_sprouting():
     # preamble
-    sim_parameters, slurm_job_id, patients_parameters = preamble()
+    sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, distributed_data_folder = preamble()
 
     # get sim parameters dataframe
     sim_parameters_df = sim_parameters.as_dataframe()
@@ -184,7 +202,7 @@ def patient1_vascular_sprouting():
         sim_parameters.set_value("V_uc_af", V_uc_af)
 
         # run simulation
-        run_simulation(spatial_dimension=3,
+        run_simulation(spatial_dimension=spatial_dimension,
                        sim_parameters=sim_parameters,
                        patient_parameters=patients_parameters["patient1"],
                        steps=n_steps,
@@ -202,12 +220,12 @@ def patient1_vascular_sprouting():
                        recompute_mesh=True,
                        recompute_c0=True,
                        write_checkpoints=False,
-                       save_distributed_files_to="/local/frapra/3drh")
+                       save_distributed_files_to=distributed_data_folder)
 
 
 def tip_cell_activation_patient0_and_2():
     # preamble
-    sim_parameters, slurm_job_id, patients_parameters = preamble()
+    sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, _ = preamble()
 
     # get sim parameters dataframe
     sim_parameters_df = sim_parameters.as_dataframe()
@@ -227,7 +245,7 @@ def tip_cell_activation_patient0_and_2():
              f"activation for each condition in {patient}.")
 
         # Test tip cell activation
-        test_tip_cell_activation(spatial_dimension=3,
+        test_tip_cell_activation(spatial_dimension=spatial_dimension,
                                  standard_sim_parameters=sim_parameters,
                                  patient_parameters=patients_parameters[patient],
                                  out_folder_name=f"dolfinx_{patient}_tip-cell-activation",
@@ -243,7 +261,8 @@ def tip_cell_activation_patient0_and_2():
 
 def tip_cell_activation_V_pT_and_V_uc_ranges_for_each_patient():
     # preamble
-    sim_parameters, slurm_job_id, patients_parameters = preamble()
+    sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, _ = preamble()
+
     # get sim parameters dataframe
     sim_parameters_df = sim_parameters.as_dataframe()
     # get min tdf_i for each patient
@@ -271,7 +290,7 @@ def tip_cell_activation_V_pT_and_V_uc_ranges_for_each_patient():
              f" to tip cell activation.")
 
         # Test tip cell activation
-        test_tip_cell_activation(spatial_dimension=3,
+        test_tip_cell_activation(spatial_dimension=spatial_dimension,
                                  standard_sim_parameters=sim_parameters,
                                  patient_parameters=patients_parameters[patient],
                                  out_folder_name=f"dolfinx_{patient}_tip-cell-activation",
@@ -287,7 +306,7 @@ def tip_cell_activation_V_pT_and_V_uc_ranges_for_each_patient():
 
 def test_adaptive_vascular_sprouting_for_patient1():
     # preamble
-    sim_parameters, slurm_job_id, patients_parameters = preamble()
+    sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, distributed_data_folder = preamble()
 
     # get sim parameters dataframe
     sim_parameters_df = sim_parameters.as_dataframe()
@@ -301,31 +320,28 @@ def test_adaptive_vascular_sprouting_for_patient1():
     sim_parameters.set_value("V_pT_af", V_pT_af_max)
 
     # get number of step to reach the volume observed in patient1
-    n_steps = 150
+    n_steps = 500
 
     # set sim rationale
     sim_rationale = "Testing adaptive solver"
 
     # set adaptive_simulation
-    simulation = RHTimeAdaptiveSimulation(spatial_dimension=3,
-                                          sim_parameters=sim_parameters,
-                                          patient_parameters=patients_parameters["patient1"],
-                                          steps=n_steps,
-                                          delta_steps=5,
-                                          trigger_adaptive_tc_activation_after_steps=3,
-                                          save_rate=10,
-                                          out_folder_name="dolfinx_patient1_test-vascular-sprouting-adaptive",
-                                          out_folder_mode="datetime",
-                                          sim_rationale=sim_rationale + " | ADAPTIVE",
-                                          slurm_job_id=slurm_job_id,
-                                          load_from_cache=False,
-                                          write_checkpoints=False,
-                                          save_distributed_files_to="/local/frapra/3drh")
+    simulation = RHAdaptiveSimulation(spatial_dimension=spatial_dimension,
+                                      sim_parameters=sim_parameters,
+                                      patient_parameters=patients_parameters["patient1"],
+                                      steps=n_steps,
+                                      save_rate=1,
+                                      out_folder_name="dolfinx_patient1_test-vascular-sprouting-adaptive",
+                                      sim_rationale=sim_rationale + " | ADAPTIVE",
+                                      slurm_job_id=slurm_job_id,
+                                      load_from_cache=False,
+                                      write_checkpoints=False,
+                                      save_distributed_files_to=distributed_data_folder)
     simulation.run()
 
 
 def test_different_tipe_steps_patient1():
-    sim_parameters, slurm_job_id, patients_parameters = preamble()
+    sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, distributed_data_folder = preamble()
 
     dt_range = [100, 50, 25, 10, 5, 2, 1]
     n_steps_range = [int(200 / dt) for dt in dt_range]
@@ -336,7 +352,7 @@ def test_different_tipe_steps_patient1():
         
         sim_rationale = f"Testing simulation for dt: {dt}"
 
-        run_simulation(spatial_dimension=3,
+        run_simulation(spatial_dimension=spatial_dimension,
                        sim_parameters=sim_parameters,
                        patient_parameters=patients_parameters["patient1"],
                        steps=n_steps,
@@ -348,15 +364,15 @@ def test_different_tipe_steps_patient1():
                        recompute_mesh=True,
                        recompute_c0=True,
                        write_checkpoints=False,
-                       save_distributed_files_to="/local/frapra/3drh")
+                       save_distributed_files_to=distributed_data_folder)
 
 
 def test_convergence_1_step():
-    sim_parameters, slurm_job_id, patients_parameters = preamble()
+    sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, distributed_data_folder = preamble()
 
     patient1_parameters = patients_parameters["patient1"]
 
-    sim = RHTimeSimulation(spatial_dimension=3,
+    sim = RHTimeSimulation(spatial_dimension=spatial_dimension,
                            sim_parameters=sim_parameters,
                            patient_parameters=patient1_parameters,
                            steps=1,
@@ -366,7 +382,7 @@ def test_convergence_1_step():
                            sim_rationale="Testing",
                            slurm_job_id=slurm_job_id,
                            write_checkpoints=False,
-                           save_distributed_files_to="/local/frapra/3drh")
+                           save_distributed_files_to=distributed_data_folder)
     # setup the convergence test
     sim.setup_convergence_test()
     # setup list for storing performance
