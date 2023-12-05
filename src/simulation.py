@@ -978,6 +978,15 @@ class RHAdaptiveSimulation(RHTimeSimulation):
                          write_checkpoints,
                          save_distributed_files_to)
 
+    def _solve_problem(self):
+        try:
+            self.solver.solve(self.u)
+        except RuntimeError as e:
+            # store error info
+            self.runtime_error_occurred = True
+            self.error_msg = str(e)
+            logger.error(str(e))
+
     def _check_tc_activation_at_dt(self, putative_dt):
         """
         Check if, after dt, the conditions for tc activation hold
@@ -1038,6 +1047,31 @@ class RHAdaptiveSimulation(RHTimeSimulation):
                 return self._find_next_activation_dt(dt0, mid_dt)
             else:
                 return self._find_next_activation_dt(mid_dt, dt1)
+
+    def _active_tc_rutine(self):
+        # set dt value to min
+        self.dt_constant.value = self.min_dt
+
+        # manage tip cells
+        self.tip_cell_manager.activate_tip_cell(self.c_old, self.af_old, self.grad_af_old, self.t)
+        self.tip_cell_manager.revert_tip_cells(self.af_old, self.grad_af_old)
+        self.tip_cell_manager.move_tip_cells(self.c_old, self.af_old, self.grad_af_old)
+
+        # store tip cells in fenics function and json file
+        self.t_c_f_function = self.tip_cell_manager.get_latest_tip_cell_function()
+        self.t_c_f_function.x.scatter_forward()
+        self.tip_cell_manager.save_incremental_tip_cells(f"{self.report_folder}/incremental_tipcells.json", self.t)
+
+        # solve
+        self._solve_problem()
+
+        # update time
+        self.t += self.dt_constant.value
+
+        # assign new value to phi
+        self.phi_expression.update_time(self.t)
+        self.phi.interpolate(self.phi_expression.eval)
+        self.phi.x.scatter_forward()
 
     def _time_iteration(self, test_convergence: bool = False):
         # define weak form
@@ -1141,40 +1175,6 @@ class RHAdaptiveSimulation(RHTimeSimulation):
 
             # update progress bar
             self.pbar.update(self.dt_constant.value)
-
-    def _solve_problem(self):
-        try:
-            self.solver.solve(self.u)
-        except RuntimeError as e:
-            # store error info
-            self.runtime_error_occurred = True
-            self.error_msg = str(e)
-            logger.error(str(e))
-
-    def _active_tc_rutine(self):
-        # set dt value to min
-        self.dt_constant.value = self.min_dt
-
-        # manage tip cells
-        self.tip_cell_manager.activate_tip_cell(self.c_old, self.af_old, self.grad_af_old, self.t)
-        self.tip_cell_manager.revert_tip_cells(self.af_old, self.grad_af_old)
-        self.tip_cell_manager.move_tip_cells(self.c_old, self.af_old, self.grad_af_old)
-
-        # store tip cells in fenics function and json file
-        self.t_c_f_function = self.tip_cell_manager.get_latest_tip_cell_function()
-        self.t_c_f_function.x.scatter_forward()
-        self.tip_cell_manager.save_incremental_tip_cells(f"{self.report_folder}/incremental_tipcells.json", self.t)
-
-        # solve
-        self._solve_problem()
-
-        # update time
-        self.t += self.dt_constant.value
-
-        # assign new value to phi
-        self.phi_expression.update_time(self.t)
-        self.phi.interpolate(self.phi_expression.eval)
-        self.phi.x.scatter_forward()
 
 
 class RHTestTipCellActivation(RHSimulation):
