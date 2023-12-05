@@ -54,7 +54,7 @@ def main():
     n_tc = np.zeros(n_steps)
 
     for i, key in enumerate(tip_cells_in_time.keys()):
-        steps[i] = int(key.replace("step_", ""))
+        steps[i] = float(key.replace("step_", ""))
         n_tc[i] = len(tip_cells_in_time[key])
 
     # plot
@@ -71,37 +71,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-# def load_itc_dict(folder_name: str):
-#     # get tip cells incremental
-#     if folder_name.endswith("/"):
-#         tci_f = folder_name + "incremental_tipcells.json"
-#     else:
-#         tci_f = folder_name + "/incremental_tipcells.json"
-#
-#     # load json
-#     with open(tci_f, "r") as infile:
-#         tci_dict = json.load(infile)
-#
-#     return tci_dict
-#
-#
-# # load folder
-# if SIM_FOLDER_COM in sys.argv:
-#     sim_folder_name = sys.argv[sys.argv.index(SIM_FOLDER_COM) + 1]
-# else:
-#     raise RuntimeError("You must specify an input")
-#
-# tci_dict = load_itc_dict(sim_folder_name)
-#
-# # if resumed
-# if APPEND_FOLDER_COM in sys.argv:
-#     resume_folder_name = sys.argv[sys.argv.index(APPEND_FOLDER_COM) + 1]
-#     resumed_tci_dict = load_itc_dict(resume_folder_name)
-#     tci_dict.update(resumed_tci_dict)
-
-
