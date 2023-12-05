@@ -21,6 +21,7 @@ from petsc4py import PETSc
 import mocafe.fenut.fenut as fu
 import mocafe.fenut.mansimdata as mansim
 import mocafe.angie.forms
+from mocafe.math import project
 from mocafe.fenut.parameters import Parameters
 from mocafe.angie.tipcells import TipCellManager, load_tip_cells_from_json
 import src.forms
@@ -140,72 +141,72 @@ def _compute_c_0(spatial_dimension: int,
     c_old.x.scatter_forward()
 
 
-class GradientEvaluator:
-    """
-    Class to efficiently compute the af gradient. Defined to avoid the use of ``fenics.project(grad(af), V)``.
-    This class keep the solver for the gradient saved, so to reuse it every time it is required.
-    """
-    def __init__(self):
-        self.solver = None
-        self.a = None
-
-    def compute_gradient(self,
-                         f: dolfinx.fem.Function,
-                         V: dolfinx.fem.FunctionSpace,
-                         sol: dolfinx.fem.Function,
-                         options: Dict = None,
-                         destroy: bool = False):
-        """
-        Efficiently compute the gradient of a function.
-
-        :param f: function to be derived.
-        :param V: f's function space.
-        :param sol: function to store the gradient.
-        :param options: options for the solver to be used.
-        """
-        # manage none dict
-        if options is None:
-            options = {}
-        # define test function
-        v = ufl.TestFunction(V)
-
-        # define lhs variational form (time independent)
-        if self.solver is None:
-            # define trial function
-            u = ufl.TrialFunction(V)
-            # define lhs for problem of finding the gradient
-            a = dolfinx.fem.form(ufl.dot(u, v) * ufl.dx)
-            self.a = a
-            # define operator
-            A = dolfinx.fem.petsc.assemble_matrix(a, [])
-            A.assemble()
-            # init solver
-            ksp = PETSc.KSP().create(comm_world)
-            # set solver options
-            opts = PETSc.Options()
-            for opt, opt_value in options.items():
-                opts[opt] = opt_value
-            ksp.setFromOptions()
-            # set operator
-            ksp.setOperators(A)
-            # set solver
-            self.solver = ksp
-            # destroy A
-            A.destroy()
-
-        # define b
-        L = dolfinx.fem.form(ufl.inner(ufl.grad(f), v) * ufl.dx)
-        b = dolfinx.fem.petsc.assemble_vector(L)
-        dolfinx.fem.petsc.apply_lifting(b, [self.a], [[]])
-        b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
-        # solve
-        self.solver.solve(b, sol.vector)
-        sol.x.scatter_forward()
-
-        # destroy
-        b.destroy()
-        if destroy:
-            self.solver.destroy()
+# class GradientEvaluator:
+#     """
+#     Class to efficiently compute the af gradient. Defined to avoid the use of ``fenics.project(grad(af), V)``.
+#     This class keep the solver for the gradient saved, so to reuse it every time it is required.
+#     """
+#     def __init__(self):
+#         self.solver = None
+#         self.a = None
+#
+#     def compute_gradient(self,
+#                          f: dolfinx.fem.Function,
+#                          V: dolfinx.fem.FunctionSpace,
+#                          sol: dolfinx.fem.Function,
+#                          options: Dict = None,
+#                          destroy: bool = False):
+#         """
+#         Efficiently compute the gradient of a function.
+#
+#         :param f: function to be derived.
+#         :param V: f's function space.
+#         :param sol: function to store the gradient.
+#         :param options: options for the solver to be used.
+#         """
+#         # manage none dict
+#         if options is None:
+#             options = {}
+#         # define test function
+#         v = ufl.TestFunction(V)
+#
+#         # define lhs variational form (time independent)
+#         if self.solver is None:
+#             # define trial function
+#             u = ufl.TrialFunction(V)
+#             # define lhs for problem of finding the gradient
+#             a = dolfinx.fem.form(ufl.dot(u, v) * ufl.dx)
+#             self.a = a
+#             # define operator
+#             A = dolfinx.fem.petsc.assemble_matrix(a, [])
+#             A.assemble()
+#             # init solver
+#             ksp = PETSc.KSP().create(comm_world)
+#             # set solver options
+#             opts = PETSc.Options()
+#             for opt, opt_value in options.items():
+#                 opts[opt] = opt_value
+#             ksp.setFromOptions()
+#             # set operator
+#             ksp.setOperators(A)
+#             # set solver
+#             self.solver = ksp
+#             # destroy A
+#             A.destroy()
+#
+#         # define b
+#         L = dolfinx.fem.form(ufl.inner(ufl.grad(f), v) * ufl.dx)
+#         b = dolfinx.fem.petsc.assemble_vector(L)
+#         dolfinx.fem.petsc.apply_lifting(b, [self.a], [[]])
+#         b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+#         # solve
+#         self.solver.solve(b, sol.vector)
+#         sol.x.scatter_forward()
+#
+#         # destroy
+#         b.destroy()
+#         if destroy:
+#             self.solver.destroy()
 
 
 class RHSimulation:
@@ -240,10 +241,11 @@ class RHSimulation:
         # parameters
         self.sim_parameters: Parameters = sim_parameters  # simulation parameters
         self.patient_parameters: Dict = patient_parameters  # patient parameters
-        self.lsp = {
+        self.lsp = {                                      # linear solver parameters
             "ksp_type": "gmres",
             "pc_type": "asm",
-            "ksp_monitor": None}  # linear solver parameters
+            "ksp_monitor": None
+        }
 
         # proprieties
         self.spatial_dimension: int = spatial_dimension  # spatial dimension
@@ -367,19 +369,16 @@ class RHSimulation:
         """
         Generate initial conditions not depending on from the simulaion parameters
         """
-        # get collapsed subspace
-        subV_collapsed, _ = self.V.sub(0).collapse()
-
         # define initial condition for tumor
         logger.info(f"{self.out_folder_name}:Computing phi0...")
-        # initial semiaxes of the tumor
+        # initial semi-axes of the tumor
         self.phi_expression = RHEllipsoid(sim_parameters,
                                           self.patient_parameters,
                                           self.mesh_parameters,
                                           self.ureg,
                                           0,
                                           self.spatial_dimension)
-        self.phi = dolfinx.fem.Function(subV_collapsed)
+        self.phi = dolfinx.fem.Function(self.subV0_collapsed)
         self.phi.interpolate(self.phi_expression.eval)
         self.phi.x.scatter_forward()
 
@@ -389,9 +388,8 @@ class RHSimulation:
 
         # af gradient
         logger.info(f"{self.out_folder_name}:Computing grad_af0...")
-        self.ge = GradientEvaluator()
         self.grad_af_old = dolfinx.fem.Function(self.vec_V)
-        self.ge.compute_gradient(self.af_old, self.vec_V, self.grad_af_old, self.lsp)
+        project(ufl.grad(self.af_old), target_func=self.grad_af_old)
 
         # define tip cell manager
         self.tip_cell_manager = TipCellManager(self.mesh, self.sim_parameters)
@@ -455,9 +453,6 @@ class RHSimulation:
         # close pbar file
         if (rank == 0) and (self.slurm_job_id is not None):
             self.pbar_file.close()
-
-        # destroy solver of gradient evaluator
-        self.ge.solver.destroy()
 
         # save sim report
         if self.runtime_error_occurred:
@@ -808,7 +803,7 @@ class RHTimeSimulation(RHSimulation):
             self.u_old.x.scatter_forward()
             self.af_old, self.c_old, self.mu_old = self.u_old.split()
             # assign new value to grad_af_old
-            self.ge.compute_gradient(self.af_old, self.vec_V, self.grad_af_old, self.lsp)
+            project(ufl.grad(self.af_old), target_func=self.grad_af_old)
             # assign new value to phi
             self.phi_expression.update_time(t)
             self.phi.interpolate(self.phi_expression.eval)
@@ -956,14 +951,12 @@ class RHTimeSimulation(RHSimulation):
         return simulation
 
 
-class RHTimeAdaptiveSimulation(RHTimeSimulation):
+class RHAdaptiveSimulation(RHTimeSimulation):
     def __init__(self,
                  spatial_dimension: int,
                  sim_parameters: Parameters,
                  patient_parameters: Dict,
                  steps: int,
-                 delta_steps: int,
-                 trigger_adaptive_tc_activation_after_steps: int,
                  save_rate: int = 1,
                  out_folder_name: str = mansim.default_data_folder_name,
                  out_folder_mode: str = None,
@@ -984,207 +977,204 @@ class RHTimeAdaptiveSimulation(RHTimeSimulation):
                          load_from_cache,
                          write_checkpoints,
                          save_distributed_files_to)
-        # init time window
-        self.delta_steps = delta_steps
-        self.time_jump: float = sim_parameters.get_value("dt") * delta_steps
-        # set after how many steps the adaptive solver is activated
-        self.trigger_time_jump: int = trigger_adaptive_tc_activation_after_steps
 
-    def __build_weak_form(self, u: dolfinx.fem.Function,
-                          af_dt: bool = True,
-                          **weak_form_kwargs) -> ufl.Form:
-        # assign functions to u
-        # fenics.assign(u, [self.af_old, self.c_old, self.mu_old])
-        af, c, mu = ufl.split(u)
+    def _check_tc_activation_at_dt(self, putative_dt):
+        """
+        Check if, after dt, the conditions for tc activation hold
+        """
+        # log
+        logger.info(f"Checking tc activation at dt={putative_dt}")
+
+        self.dt_constant.value = putative_dt
+        # update phi
+        self.phi_expression.update_time(self.t + putative_dt)
+        self.phi.interpolate(self.phi_expression.eval)
+        self.phi.x.scatter_forward()
+        # compute af0 with new phi
+
+        # solve
+        self._solve_problem()
+
+        # check if runtime error occurred
+        if self.runtime_error_occurred:
+            return False
+
+        # if no error, check for tc activation
+        # extract af, c, and mu
+        putative_af, putative_c, putative_mu = self.u.split()
+        # compute grad_af
+        project(ufl.grad(putative_af), target_func=self.grad_af_old)
+        # check
+        tc_can_activate = self.tip_cell_manager.test_tip_cell_activation(putative_c,
+                                                                         putative_af,
+                                                                         self.grad_af_old)
+
+        return tc_can_activate
+
+    def _find_next_activation_dt(self,
+                                 dt0: float,
+                                 dt1: float) -> int:
+        # check if dt0 < dt1
+        assert dt0 < dt1, "dt0 should be always less than dt1"
+
+        # log
+        logger.info(f"Looking for activation dt between {dt0} and {dt1}")
+
+        # If the difference between dt0 and dt1 is less than min_dt, return dt1
+        # Else, find the dt value between dt0 and dt1 which lead to the activation of the tcs
+        if abs(dt1 - dt0) <= self.min_dt:
+            next_activation_dt = int(np.round(dt1))
+            logger.info(f"{self.out_folder_name}:Found dt for the next activation: {next_activation_dt}")
+            return next_activation_dt
+        else:
+            # compute mid_dt
+            mid_dt = abs(dt1 - dt0) / 2
+            # check tc_activation at mid_dt
+            tc_can_activate = self._check_tc_activation_at_dt(mid_dt)
+
+            # if tc can activate, it means that the minimal dt leading to tc activation is between dt0 and mid_dt
+            # else, if means that the minimal dt is between mid_dt and dt1
+            if tc_can_activate:
+                return self._find_next_activation_dt(dt0, mid_dt)
+            else:
+                return self._find_next_activation_dt(mid_dt, dt1)
+
+    def _time_iteration(self, test_convergence: bool = False):
+        # define weak form
+        logger.info(f"{self.out_folder_name}:Defining weak form...")
+        self.u = dolfinx.fem.Function(self.V)
+        self.u.x.array[:] = self.u_old.x.array
+        # assign u_old to u
+        af, c, mu = ufl.split(self.u)
         # define test functions
         v1, v2, v3 = ufl.TestFunctions(self.V)
-        # build total form
-        if af_dt:
-            af_form = src.forms.angiogenic_factors_form_dt(af, self.af_old, self.phi, c, v1, self.sim_parameters,
-                                                           **weak_form_kwargs)
-        else:
-            af_form = src.forms.angiogenic_factors_form_eq(af, self.phi, c, v1, self.sim_parameters,
-                                                           **weak_form_kwargs)
-        capillaries_form = mocafe.angie.forms.angiogenesis_form_no_proliferation(
-            c, self.c_old, mu, self.mu_old, v2, v3, self.sim_parameters, **weak_form_kwargs
+
+        # init dt values
+        self.min_dt = int(np.round(self.sim_parameters.get_value("dt")))
+        self.max_dt = 100 * self.min_dt
+        self.dt_constant = dolfinx.fem.Constant(
+            self.mesh, dolfinx.default_scalar_type(self.min_dt)
         )
-        form = af_form + capillaries_form
-        # return form
-        return form
 
-    # def _test_tip_cell_activation_after_delta_step(self,
-    #                                                u_temp: fenics.Function,
-    #                                                phi_temp: fenics.Function,
-    #                                                phi_exp_temp: fenics.Expression,
-    #                                                grad_af_temp: fenics.Function,
-    #                                                t: float,
-    #                                                time_jump: float):
-    #     # define bigger dt
-    #     bigger_dt = time_jump
-    #     # update tumor dimension
-    #     phi_exp_temp.t = t + time_jump
-    #     phi_temp.assign(fenics.interpolate(phi_exp_temp, self.V.sub(0).collapse()))
-    #     # build weak from for dt = time_jump * dt
-    #     form = self.__build_weak_form(u_temp, phi_temp=phi_temp, dt=bigger_dt)
-    #     # get Jacobian
-    #     J = fenics.derivative(form, u_temp)
-    #     # define problem
-    #     problem = PETScProblem(J, form, [])
-    #     # solve
-    #     self._solve(problem, u_temp)
-    #     # check if runtime error occurred
-    #     if self.runtime_error_occurred:
-    #         return False
-    #     # define functions
-    #     af_temp, c_temp, mu_temp = u_temp.split()
-    #     self.ge.compute_gradient(af_temp, self.vec_V, grad_af_temp, self.lsp)
-    #     # check tc_activation
-    #     tc_activate_after_delta_step = self.tip_cell_manager.test_tip_cell_activation(c_temp,
-    #                                                                                   af_temp,
-    #                                                                                   grad_af_temp)
-    #
-    #     return tc_activate_after_delta_step
+        # build form
+        af_eq_form = src.forms.angiogenic_factors_form_eq(af, self.phi, c, v1, self.sim_parameters)
+        capillaries_form = src.forms.angiogenesis_form_no_proliferation(
+            c, self.c_old, mu, self.mu_old, v2, v3, self.sim_parameters, dt=self.dt_constant)
+        form_af_eq = af_eq_form + capillaries_form
 
-    # def _find_next_activation_time(self, t: float,
-    #                                putative_next_time: float,
-    #                                u_temp: fenics.Function,
-    #                                phi_temp: fenics.Function,
-    #                                phi_exp_temp: fenics.Expression,
-    #                                grad_af_temp: fenics.Function) -> float:
-    #     if abs(putative_next_time - t) <= self.sim_parameters.get_value("dt"):
-    #         logger.info(f"{self.out_folder_name}:Found next time: {putative_next_time}")
-    #         return putative_next_time
-    #     else:
-    #         # define mid step
-    #         mid_time = (putative_next_time + t) / 2
-    #         # define the delta between the current step and the actual step
-    #         delta_mid_time = mid_time - t
-    #
-    #         logger.info(f"{self.out_folder_name}:Checking tip cell activation at mid point: {mid_time}")
-    #         # solve problem after delta_mid_step
-    #         tc_activate_at_mid_step = self._test_tip_cell_activation_after_delta_step(u_temp, phi_temp, phi_exp_temp,
-    #                                                                                   grad_af_temp, t, delta_mid_time)
-    #         if tc_activate_at_mid_step:
-    #             return self._find_next_activation_time(t, mid_time, u_temp, phi_temp, phi_exp_temp, grad_af_temp)
-    #         else:
-    #             return self._find_next_activation_time(mid_time, putative_next_time, u_temp, phi_temp, phi_exp_temp,
-    #                                                    grad_af_temp)
-    def _solve_using_solver(self, solver, u):
+        # free energy form for time stepping
+        ch_free_energy_form = dolfinx.fem.form(src.forms.chan_hillard_free_enery(self.mu_old))
+
+        # define problem
+        logger.info(f"{self.out_folder_name}:Defining problem...")
+        problem = dolfinx.fem.petsc.NonlinearProblem(form_af_eq, self.u)
+
+        # define solver
+        self.solver = NewtonSolver(comm_world, problem)
+        self.solver.report = True  # report iterations
+        # set options for krylov solver
+        opts = PETSc.Options()
+        option_prefix = self.solver.krylov_solver.getOptionsPrefix()
+        for o, v in self.lsp.items():
+            opts[f"{option_prefix}{o}"] = v
+        self.solver.krylov_solver.setFromOptions()
+
+        # init time iteration
+        self.t = int(np.round(self.t0))
+        product_Mdt = float(self.sim_parameters.get_value("M")) * float(self.dt_constant.value)
+        super()._set_pbar(total=self.steps)
+
+        # log
+        logger.info(f"{self.out_folder_name}:Starting time iteration...")
+
+        # iterate in time
+        while self.t < (self.steps + 1):
+            # compute current n_tc
+            current_n_tc = len(self.tip_cell_manager.get_global_tip_cells_list())
+            # check if the current conditions lead to activation
+            tc_can_activate = self.tip_cell_manager.test_tip_cell_activation(self.c_old, self.af_old, self.grad_af_old)
+
+            # If there are no active tc and tcs cannot activate (simulation becomes purely PDE-based), we fast-forward
+            # the simulation.
+            if (current_n_tc == 0) and (not tc_can_activate):
+                local_CH_energy = dolfinx.fem.assemble_scalar(ch_free_energy_form)
+                global_CH_energy = comm_world.allreduce(local_CH_energy, op=MPI.SUM)
+                putative_dt = self.max_dt / np.sqrt(1 + (50 * (global_CH_energy ** 2)))
+                putative_dt = max(self.min_dt, putative_dt)
+                logger.info(f"Initial putative dt: {putative_dt}")
+
+                # check if time dt is enough to lead to activation
+                tc_activate_after_putative_dt = self._check_tc_activation_at_dt(putative_dt)
+
+                if tc_activate_after_putative_dt:
+                    # find dt for the next tc activation
+                    self._find_next_activation_dt(0, putative_dt)
+                else:
+                    # log
+                    logger.info(f"No tc activated after dt={self.dt_constant.value}")
+
+                # store the current empty list of tcs for each time point between t and dt
+                for intermediate_time in range(int(self.dt_constant.value)):
+                    self.tip_cell_manager.save_incremental_tip_cells(
+                        f"{self.report_folder}/incremental_tipcells.json", self.t + intermediate_time)
+
+                # update time
+                self.t += self.dt_constant.value
+                logger.info(f"Updated time to={self.t}")
+            else:
+                self._active_tc_rutine()
+
+            # if error occurred, stop iteration
+            if self.runtime_error_occurred:
+                break
+
+            # assign to old
+            self.u_old.x.array[:] = self.u.x.array
+            self.u_old.x.scatter_forward()
+            self.af_old, self.c_old, self.mu_old = self.u_old.split()
+            # assign new value to grad_af_old
+            project(ufl.grad(self.af_old), target_func=self.grad_af_old)
+
+            # save
+            # if (self.t % self.save_rate == 0) or (self.t == self.steps) or self.runtime_error_occurred: # todo: remove
+            self._write_files(self.t)
+
+            # update progress bar
+            self.pbar.update(self.dt_constant.value)
+
+    def _solve_problem(self):
         try:
-            solver.solve(u)
+            self.solver.solve(self.u)
         except RuntimeError as e:
             # store error info
             self.runtime_error_occurred = True
             self.error_msg = str(e)
             logger.error(str(e))
 
-    def _time_iteration(self, test_convergence: bool = False):
-        # define fine_dt and coarse_dt
-        fine_dt = self.sim_parameters.get_value("dt")
-        fine_delta_step = 1
-        coarse_dt = self.time_jump
-        coarse_delta_step = self.delta_steps
+    def _active_tc_rutine(self):
+        # set dt value to min
+        self.dt_constant.value = self.min_dt
 
-        # define u
-        u = dolfinx.fem.Function(self.V)
+        # manage tip cells
+        self.tip_cell_manager.activate_tip_cell(self.c_old, self.af_old, self.grad_af_old, self.t)
+        self.tip_cell_manager.revert_tip_cells(self.af_old, self.grad_af_old)
+        self.tip_cell_manager.move_tip_cells(self.c_old, self.af_old, self.grad_af_old)
 
-        # define fine problem
-        logger.info(f"{self.out_folder_name}:Defining fine problem...")
-        fine_form = self.__build_weak_form(u)                            # weak form
-        fine_problem = dolfinx.fem.petsc.NonlinearProblem(fine_form, u)  # problem
+        # store tip cells in fenics function and json file
+        self.t_c_f_function = self.tip_cell_manager.get_latest_tip_cell_function()
+        self.t_c_f_function.x.scatter_forward()
+        self.tip_cell_manager.save_incremental_tip_cells(f"{self.report_folder}/incremental_tipcells.json", self.t)
 
-        # define coarse problem
-        logger.info(f"{self.out_folder_name}:Defining coarse problem...")
-        coarse_form = self.__build_weak_form(u, af_dt=False, dt=coarse_dt)    # weak form
-        coarse_problem = dolfinx.fem.petsc.NonlinearProblem(coarse_form, u)     # problem
+        # solve
+        self._solve_problem()
 
-        # define a solver for each problem
-        fine_problem_solver = NewtonSolver(comm_world, fine_problem)  # set solver
-        coarse_problem_solver = NewtonSolver(comm_world, coarse_problem)
-        for solver in [fine_problem_solver, coarse_problem_solver]:
-            if "ksp_monitor" in self.lsp.keys():
-                solver.report = True  # report iterations
-            # set options for krylov solver
-            ksp = solver.krylov_solver
-            opts = PETSc.Options()
-            option_prefix = ksp.getOptionsPrefix()
-            for o, v in self.lsp.items():
-                opts[f"{option_prefix}{o}"] = v
-            ksp.setFromOptions()
+        # update time
+        self.t += self.dt_constant.value
 
-        # init time iteration
-        step = 0                               # time step
-        t = self.t0 + (step * fine_dt)         # time
-        tip_cell_count = np.zeros(self.steps)  # tip cell number in time
-        super()._set_pbar(total=self.steps)    # setup pbar
-
-        # log
-        logger.info(f"{self.out_folder_name}:Starting time iteration...")
-        # iterate in time
-        while step < self.steps + 1:
-            # activate tip cells
-            self.tip_cell_manager.activate_tip_cell(self.c_old, self.af_old, self.grad_af_old, step)
-
-            # revert tip cells
-            self.tip_cell_manager.revert_tip_cells(self.af_old, self.grad_af_old)
-
-            # move tip cells
-            self.tip_cell_manager.move_tip_cells(self.c_old, self.af_old, self.grad_af_old)
-
-            # store tip cells in fenics function and json file
-            self.t_c_f_function.assign(self.tip_cell_manager.get_latest_tip_cell_function())
-            self.tip_cell_manager.save_incremental_tip_cells(f"{self.report_folder}/incremental_tipcells.json", step)
-
-            # store tip cell count in array
-            current_tip_cell_count = len(self.tip_cell_manager.get_global_tip_cells_list())
-            tip_cell_count[step] = current_tip_cell_count
-
-            # Check if in all of the latest "trigger_time_jump" steps the number of tip cells is 0
-            # If yes, proceed faster in time with coarse problem.
-            # Else, go to traditional problem
-            if step > self.trigger_time_jump and \
-                    np.all(tip_cell_count[step + 1 - self.trigger_time_jump:step + 1] == 0):
-                logger.info(f"{self.out_folder_name}: (step {step}) Solving coarse problem...")
-                self._solve_using_solver(coarse_problem_solver, u)
-                # update time
-                t += coarse_dt                          # time
-                step += coarse_delta_step               # step
-                latest_delta_step = coarse_delta_step   # delta step (to update pbar)
-            else:
-                logger.info(f"{self.out_folder_name}: (step {step}) Solving fine problem...")
-                self._solve_using_solver(fine_problem_solver, u)
-                # update time
-                t += fine_dt  # time
-                step += fine_delta_step  # step
-                latest_delta_step = fine_delta_step  # delta step (to update pbar)
-
-            # assign to old
-            new_af, new_c, new_mu = u.split()
-            self.af_old.interpolate(new_af)
-            self.af_old.x.scatter_forward()
-            self.c_old.interpolate(new_c)
-            self.c_old.x.scatter_forward()
-            self.af_old.interpolate(new_mu)
-            self.af_old.x.scatter_forward()
-            # assign new value to grad_af_old
-            self.ge.compute_gradient(self.af_old, self.vec_V, self.grad_af_old, self.lsp)
-            # assign new value to phi
-            self.phi_expression.update_time(t)
-            self.phi.interpolate(self.phi_expression.eval)
-            self.phi.x.scatter_forward()
-
-            # save
-            if (step % self.save_rate == 0) or (step == self.steps) or self.runtime_error_occurred:
-                self._write_files(step)
-
-            # if runtime error occurred exit
-            if self.runtime_error_occurred:
-                return 1
-
-            # update progress bar
-            self.pbar.update(latest_delta_step)
-
-        return 0
+        # assign new value to phi
+        self.phi_expression.update_time(self.t)
+        self.phi.interpolate(self.phi_expression.eval)
+        self.phi.x.scatter_forward()
 
 
 class RHTestTipCellActivation(RHSimulation):
@@ -1225,6 +1215,8 @@ class RHTestTipCellActivation(RHSimulation):
 
         self._spatial_discretization()  # initialize function space
 
+        self._generate_u_old()
+
         self._generate_sim_parameters_independent_initial_conditions()
 
         # get params dictionary
@@ -1250,10 +1242,7 @@ class RHTestTipCellActivation(RHSimulation):
             self._generate_sim_parameters_dependent_initial_conditions(sim_parameters=current_sim_parameters)
 
             # call activate tip cell
-            self.tip_cell_manager.activate_tip_cell(self.c_old, self.af_old, self.grad_af_old, 1)
-
-            # check if tip cell has been activated
-            tipcell_activated = (len(self.tip_cell_manager.get_global_tip_cells_list()) > 0)
+            tipcell_activated = self.tip_cell_manager.test_tip_cell_activation(self.c_old, self.af_old, self.grad_af_old)
 
             # store result in dataframe
             tip_cell_activation_df = tip_cell_activation_df.append(
@@ -1261,11 +1250,12 @@ class RHTestTipCellActivation(RHSimulation):
                 ignore_index=True
             )
 
-            if rank == 0:
-                # write at each step
-                tip_cell_activation_df.to_csv(f"{self.data_folder}/tipcell_activation.csv")
-                # update pbar
-                self.pbar.update(1)
+            # update pbar
+            self.pbar.update(1)
+
+        # write dataframe to csv
+        if rank == 0:
+            tip_cell_activation_df.to_csv(f"{self.data_folder}/tipcell_activation.csv")
 
         self._end_simulation()  # conclude time iteration
 
