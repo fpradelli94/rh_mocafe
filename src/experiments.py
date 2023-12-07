@@ -132,7 +132,7 @@ def check_tip_cell_activation_for_each_patient():
     T_c_estimated = float(sim_parameters.get_value("T_c"))
     T_c_range = np.array([0., (T_c_estimated / 10), T_c_estimated, (10 * T_c_estimated)])
 
-    for patient_number in range(3):
+    for patient_number in [1]:
         logger.info(f"Starting tip cell activation test for patient{patient_number}")
 
         current_patient_parameter = patients_parameters[f"patient{patient_number}"]  # load patient params
@@ -176,7 +176,8 @@ def tip_cell_activation_patient1():
                              recompute_c0=True,
                              tdf_i=tdf_i_range,
                              V_pT_af=V_pT_af_range,
-                             V_uc_af=V_uc_af_range)
+                             V_uc_af=V_uc_af_range,
+                             write_checkpoints=False)
 
 
 def patient1_vascular_sprouting():
@@ -256,7 +257,8 @@ def tip_cell_activation_patient0_and_2():
                                  recompute_c0=True,
                                  tdf_i=tdf_i_range,
                                  V_pT_af=V_pT_af_range,
-                                 V_uc_af=V_uc_af_range)
+                                 V_uc_af=V_uc_af_range,
+                                 write_checkpoints=False)
 
 
 def tip_cell_activation_V_pT_and_V_uc_ranges_for_each_patient():
@@ -320,7 +322,7 @@ def test_adaptive_vascular_sprouting_for_patient1():
     sim_parameters.set_value("V_pT_af", V_pT_af_max)
 
     # get number of step to reach the volume observed in patient1
-    n_steps = 500
+    n_steps = 3
 
     # set sim rationale
     sim_rationale = "Testing adaptive solver"
