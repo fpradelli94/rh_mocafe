@@ -246,13 +246,8 @@ def reproduce_results():
                    slurm_job_id=slurm_job_id)
 
 
-def test():
-    pass
-
-
 def main():
-    # patient1_vascular_sprouting()
-    src.experiments.compute_initial_condition_for_each_patient()
+    src.experiments.test_adaptive_vascular_sprouting_for_patient1()
 
 
 if __name__ == "__main__":
