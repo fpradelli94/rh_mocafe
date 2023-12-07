@@ -97,7 +97,8 @@ def time_derivative_form(var: Function,
     General time derivative form.
     """
     dt, = _unpack_parameters_list(["dt"], par, kwargs)
-    dt = Constant(var_old.function_space.mesh, dolfinx.default_scalar_type(dt))
+    if isinstance(dt, int) or isinstance(dt, float):
+        dt = Constant(var_old.function_space.mesh, dolfinx.default_scalar_type(dt))
     return ((var - var_old) / dt) * v * ufl.dx
 
 
@@ -222,14 +223,23 @@ def cahn_hillard_form(c,
     dfdc = ufl.diff(chem_potential, c)
 
     # constants
-    dt = Constant(c0.function_space.mesh, dolfinx.default_scalar_type(dt))
-    M = Constant(c0.function_space.mesh, dolfinx.default_scalar_type(M))
+    if isinstance(dt, int) or isinstance(dt, float):
+        dt = Constant(c0.function_space.mesh, dolfinx.default_scalar_type(dt))
+    if isinstance(M, float):
+        M = Constant(c0.function_space.mesh, dolfinx.default_scalar_type(M))
     lmbda = Constant(c0.function_space.mesh, dolfinx.default_scalar_type(lmbda))
 
     # define form
-    l0 = ((c - c0) / dt) * q * ufl.dx + M * ufl.dot(ufl.grad(mu_mid), ufl.grad(q)) * ufl.dx
+    l0 = (c - c0) * q * ufl.dx + dt * M * ufl.dot(ufl.grad(mu_mid), ufl.grad(q)) * ufl.dx
     l1 = mu * v * ufl.dx - dfdc * v * ufl.dx - lmbda * ufl.dot(ufl.grad(c), ufl.grad(v)) * ufl.dx
     form = l0 + l1
 
     # return form
     return form
+
+
+def chan_hillard_free_enery(mu: Function):
+
+    energy = - (ufl.grad(mu) ** 2) * ufl.dx
+
+    return energy
