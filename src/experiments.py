@@ -127,7 +127,7 @@ def check_tip_cell_activation_for_each_patient():
     T_c_estimated = float(sim_parameters.get_value("T_c"))
     T_c_range = np.array([0., (T_c_estimated / 10), T_c_estimated, (10 * T_c_estimated)])
 
-    for patient_number in [1]:
+    for patient_number in [0, 1, 2]:
         logger.info(f"Starting tip cell activation test for patient{patient_number}")
 
         current_patient_parameter = patients_parameters[f"patient{patient_number}"]  # load patient params
