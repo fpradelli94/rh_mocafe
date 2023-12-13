@@ -20,18 +20,13 @@ from mpi4py import MPI
 from petsc4py import PETSc
 import mocafe.fenut.fenut as fu
 import mocafe.fenut.mansimdata as mansim
-import mocafe.angie.forms
 from mocafe.math import project
 from mocafe.fenut.parameters import Parameters
 from mocafe.angie.tipcells import TipCellManager, load_tip_cells_from_json
 from mocafe.refine import nmm_interpolate
 import src.forms
-from src.ioutils import (read_parameters, write_parameters, dump_json, load_json, move_files_once_per_node,
-                         rmtree_if_exists_once_per_node)
+from src.ioutils import write_parameters, dump_json, move_files_once_per_node, rmtree_if_exists_once_per_node
 from src.expressions import RHEllipsoid, VesselReconstruction
-from src.simulation2d import compute_2d_mesh_for_patient
-from src.simulation3d import get_3d_mesh_for_patient
-
 
 # MPI variables
 comm_world = MPI.COMM_WORLD
@@ -70,52 +65,17 @@ def get_ureg_with_arbitrary_units(sim_parameters: Parameters):
     return local_ureg
 
 
-def get_c0(spatial_dimension: int,
-           c_old: dolfinx.fem.Function,
-           patient_parameters: Dict,
-           mesh_parameters: Parameters,
-           c0_xdmf: Path,
-           recompute_c0: bool,
-           write_checkpoints: bool) -> None:
+def compute_c0(spatial_dimension: int,
+               c_old: dolfinx.fem.Function,
+               patient_parameters: Dict,
+               mesh_parameters: Parameters) -> None:
     """
-    Get the initial condition for c0. If c0_xdmf is empty, it computes the initial condition and saves it in the
-    file for future reuse.
+    Get the initial condition for c0.
 
     :param spatial_dimension: 2D or 3D
     :param c_old: FEniCS function to store initial condition
     :param patient_parameters: patient-specific parameters Dict
     :param mesh_parameters: mesh parameters (used in the computation)
-    :param c0_xdmf: file containing c0 (if already computed once)
-    :param write_checkpoints: set to True if the latest computed c0 should be stored as XDMF file
-    :param recompute_c0: force the function to recompute c0 even if c0_xdmf is not empty.
-    """
-
-    # # define c0_label in xdmf file
-    # c0_label = "c0"
-
-    # if c0 file exists and it is not necessary to recompute it, load it. Else compute it.
-    if c0_xdmf.exists() and (recompute_c0 is False):
-        # logger.info(f"Found existing c0 in {c0_xdmf}. Loading...")
-        # with fenics.XDMFFile(str(c0_xdmf.resolve())) as infile:
-        #     infile.read_checkpoint(c_old, c0_label, 0)
-        raise NotImplementedError(f"Mesh loading not implemented yet")
-    else:
-        # compute c0
-        logger.info("Computing c0...")
-        _compute_c_0(spatial_dimension, c_old, patient_parameters, mesh_parameters)
-        # store c0
-        if write_checkpoints:
-            # with fenics.XDMFFile(str(c0_xdmf.resolve())) as outfile:
-            #     outfile.write_checkpoint(c_old, c0_label, 0, fenics.XDMFFile.Encoding.HDF5, False)
-            raise NotImplementedError(f"Checkpointing not implemented yet")
-
-
-def _compute_c_0(spatial_dimension: int,
-                 c_old: dolfinx.fem.Function,
-                 patient_parameters: Dict,
-                 mesh_parameters: Parameters):
-    """
-    Computes c initial condition in 3D
     """
     # load binary image
     pic2d_file = patient_parameters["pic2d"]
@@ -147,6 +107,14 @@ def compute_mesh(spatial_dimension,
                  patient_parameters: Dict,
                  local_ureg: UnitRegistry,
                  n_factor: float = None):
+    """
+    Compute the mesh in 2D or 3D given the patient data.
+    :param spatial_dimension: 2 for 2D, 3 for 3D
+    :param sim_parameters: simulation parameters
+    :param patient_parameters: patient parameters
+    :param local_ureg: UnitRegistry containing the measure units
+    :param n_factor: reduce nx and ny of the given factor (used for generating coarse meshes)
+    """
 
     # load Lx and Ly form patient_parameters
     Lx_real: Quantity = float(patient_parameters["simulation_box"]["Lx"]["value"]) \
@@ -177,7 +145,6 @@ def compute_mesh(spatial_dimension,
     if n_factor is not None:
         n = np.array(n) * n_factor
         n = list(n.astype(int))
-
 
     # define mesh
     if spatial_dimension == 2:
@@ -218,9 +185,7 @@ class RHSimulation:
                  out_folder_name: str = mansim.default_data_folder_name,
                  out_folder_mode: str = None,
                  sim_rationale: str = "No comment",
-                 slurm_job_id: int = None,
-                 load_from_cache: bool = False,
-                 write_checkpoints: bool = True):
+                 slurm_job_id: int = None):
         """
         Initialize a Simulation Object.
 
@@ -237,7 +202,6 @@ class RHSimulation:
         is "No comment".
         :param slurm_job_id: slurm job ID assigned to the simulation, if performed with slurm. It is used to generate a
         pbar stored in ``slurm/<slurm job ID>.pbar``.
-        :param load_from_cache: load mesh and some function from the cache. Default is False.
         """
         # parameters
         self.sim_parameters: Parameters = sim_parameters  # simulation parameters
@@ -258,27 +222,14 @@ class RHSimulation:
         self.out_folder_name = out_folder_name
 
         # flags
-        self.recompute_mesh = (not load_from_cache)  # mesh should be recomputed
-        self.recompute_c0 = (not load_from_cache)  # set if c0 should be recomputed
         self.runtime_error_occurred = False  # flag to activate in case of sim errors
-        self.write_checkpoints: bool = write_checkpoints  # if True, write simulation with checkpoints
 
         # Folders
         self.data_folder: Path = mansim.setup_data_folder(folder_path=f"saved_sim/{out_folder_name}",
                                                           auto_enumerate=out_folder_mode)
         self.report_folder: Path = self.data_folder / Path("sim_info")
         self.reproduce_folder: Path = self.data_folder / Path("0_reproduce")
-        cache_folder = Path(".sim_cache")
-        self.cache_mesh_folder: Path = cache_folder / Path("mesh")
-        self.cache_c0_folder: Path = cache_folder / Path("c0")
         self.slurm_folder = Path("slurm")
-
-        # XDMF files
-        self.cache_mesh_xdmf = self.cache_mesh_folder / Path("mesh.xdmf")
-        self.cache_c0_xdmf = self.cache_c0_folder / Path("c0.xdmf")
-
-        # Other files
-        self.mesh_parameters_file: Path = self.cache_mesh_folder / Path("mesh_parameters.csv")
 
         # Pbar file
         if (self.slurm_job_id is not None) and (rank == 0):
@@ -350,8 +301,7 @@ class RHSimulation:
         Generate initial conditions not depending on from the simulaion parameters
         """
         # capillaries
-        get_c0(self.spatial_dimension, self.c_old, self.patient_parameters, self.mesh_parameters, self.cache_c0_xdmf,
-               self.recompute_c0, self.write_checkpoints)
+        compute_c0(self.spatial_dimension, self.c_old, self.patient_parameters, self.mesh_parameters)
 
         # t_c_f_function (dynamic tip cell position)
         logger.info(f"{self.out_folder_name}:Computing t_c_f_function...")
@@ -379,7 +329,7 @@ class RHSimulation:
 
         # af
         logger.info(f"{self.out_folder_name}:Computing af0...")
-        self.__compute_af_0(sim_parameters)
+        self.__compute_af0(sim_parameters)
 
         # af gradient
         logger.info(f"{self.out_folder_name}:Computing grad_af0...")
@@ -389,7 +339,7 @@ class RHSimulation:
         # define tip cell manager
         self.tip_cell_manager = TipCellManager(self.mesh, self.sim_parameters, n_checkpoints=8)
 
-    def __compute_af_0(self, sim_parameters: Parameters, options: Dict = None):
+    def __compute_af0(self, sim_parameters: Parameters, options: Dict = None):
         """
         Solve equilibrium system for af considering the initial values of phi and c.
 
@@ -480,8 +430,6 @@ class RHTimeSimulation(RHSimulation):
                  out_folder_mode: str = None,
                  sim_rationale: str = "No comment",
                  slurm_job_id: int = None,
-                 load_from_cache: bool = False,
-                 write_checkpoints: bool = True,
                  save_distributed_files_to: str or None = None):
         """
         Initialize a Simulation Object.
@@ -502,7 +450,6 @@ class RHTimeSimulation(RHSimulation):
         is "No comment".
         :param slurm_job_id: slurm job ID assigned to the simulation, if performed with slurm. It is used to generate a
         pbar stored in ``slurm/<slurm job ID>.pbar``.
-        :param load_from_cache: load mesh and some function from the cache. Default is False.
         """
         # init super class
         super().__init__(spatial_dimension=spatial_dimension,
@@ -511,9 +458,7 @@ class RHTimeSimulation(RHSimulation):
                          out_folder_name=out_folder_name,
                          out_folder_mode=out_folder_mode,
                          sim_rationale=sim_rationale,
-                         slurm_job_id=slurm_job_id,
-                         load_from_cache=load_from_cache,
-                         write_checkpoints=write_checkpoints)
+                         slurm_job_id=slurm_job_id)
 
         # specific properties
         self.steps: int = steps  # simulations steps
@@ -524,7 +469,6 @@ class RHTimeSimulation(RHSimulation):
         self.save_distributed_files = (save_distributed_files_to is not None)  # Use PVD files instead of XDMF
 
         # specific folders
-        self.resume_folder: Path = self.data_folder / Path("resume")
         if self.save_distributed_files:
             distributed_data_folder = Path(save_distributed_files_to) / Path(self.data_folder.name)
             pvd_folder = self.data_folder / Path("pvd")
@@ -549,8 +493,6 @@ class RHTimeSimulation(RHSimulation):
                 [dolfinx.io.XDMFFile(comm_world, str(self.data_folder / Path(f"{fn}.xdmf")), "w")
                  for fn in file_names]
 
-        self.__resume_files_dict: Dict or None = None  # dictionary containing files to resume
-
     def run(self) -> bool:
         """
         Run simulation. Return True if a runtime error occurred, False otherwise.
@@ -561,20 +503,13 @@ class RHTimeSimulation(RHSimulation):
 
         self._fill_reproduce_folder()  # store current script in reproduce folder to keep track of the code
 
-        if self.__resumed:
-            self._resume_mesh()  # load mesh
-        else:
-            self._generate_mesh()  # generate mesh
+        self._generate_mesh()  # generate mesh
 
         self._spatial_discretization()  # initialize function space
 
-        if self.__resumed:
-            self._resume_initial_conditions()  # resume initial conditions
-        else:
-            self._generate_initial_conditions()  # generate initial condition
+        self._generate_initial_conditions()  # generate initial condition
 
-        # write initial conditions
-        self._write_files(0, write_mesh=True)
+        self._write_files(0, write_mesh=True)  # write initial conditions
 
         self._time_iteration()  # run simulation in time
 
@@ -595,9 +530,6 @@ class RHTimeSimulation(RHSimulation):
 
         self._generate_initial_conditions()  # generate initial condition
 
-        # write initial conditions
-        # self._write_files(0)
-
     def test_convergence(self, lsp: Dict = None):
         if lsp is not None:
             self.lsp = lsp
@@ -612,21 +544,10 @@ class RHTimeSimulation(RHSimulation):
         assert self.steps >= 0, "Simulation should have a positive number of steps"
 
     def _sim_mkdir(self):
-        super()._sim_mkdir_list(self.data_folder, self.report_folder, self.reproduce_folder,
-                                self.resume_folder, self.cache_mesh_folder, self.cache_c0_folder)
+        super()._sim_mkdir_list(self.data_folder, self.report_folder, self.reproduce_folder)
         if self.save_distributed_files:
             # make directories for distributed save
             super()._sim_mkdir_list(self.distributed_data_folder, self.pvd_folder)
-
-    def _resume_mesh(self):
-        raise NotImplementedError("Mesh reading not implemented yet")
-        # assert self.__resumed, "Trying to resume mesh but simulation was not resumed"
-        # logger.info(f"{self.out_folder_name}:Loading Mesh... ")
-        # mesh = fenics.Mesh()
-        # with fenics.XDMFFile(str(self.__resume_files_dict["mesh.xdmf"])) as infile:
-        #     infile.read(mesh)
-        # self.mesh = mesh
-        # self.mesh_parameters = read_parameters(self.__resume_files_dict["mesh_parameters.csv"])
 
     def _generate_initial_conditions(self):
         # generate u_old
@@ -635,74 +556,6 @@ class RHTimeSimulation(RHSimulation):
         super()._generate_sim_parameters_independent_initial_conditions()
         # generate initial conditions dependent from sim parameters
         super()._generate_sim_parameters_dependent_initial_conditions(self.sim_parameters)
-
-    def _resume_initial_conditions(self):
-        raise NotImplementedError(f"Resuming not implmented yet")
-        # # load incremental tip cells
-        # input_itc = load_json(self.__resume_files_dict["incremental_tip_cells.json"])
-        #
-        # # get last stem of the resumed folder
-        # last_step = max([int(step.replace("step_", "")) for step in input_itc])
-        #
-        # # capillaries
-        # logger.info(f"{self.out_folder_name}:Loading c0... ")
-        # self.c_old = fenics.Function(self.V.sub(0).collapse())
-        # resume_c_xdmf = fenics.XDMFFile(str(self.__resume_files_dict["c.xdmf"]))
-        # with resume_c_xdmf as infile:
-        #     infile.read_checkpoint(self.c_old, "c", 0)
-        # self.c_old.rename("c", "capillaries")
-        #
-        # # mu
-        # logger.info(f"{self.out_folder_name}:Loading mu... ")
-        # self.mu_old = fenics.Function(self.V.sub(0).collapse())
-        # resume_mu_xdmf = fenics.XDMFFile(str(self.__resume_files_dict["mu.xdmf"]))
-        # with resume_mu_xdmf as infile:
-        #     infile.read_checkpoint(self.mu_old, "mu", 0)
-        #
-        # # phi
-        # logger.info(f"{self.out_folder_name}:Generating phi... ")
-        # self.phi_expression = get_growing_RH_expression(self.sim_parameters,
-        #                                                 self.patient_parameters,
-        #                                                 self.mesh_parameters,
-        #                                                 self.ureg,
-        #                                                 last_step,
-        #                                                 self.spatial_dimension)
-        # self.phi = fenics.interpolate(self.phi_expression, self.V.sub(0).collapse())
-        # self.phi.rename("phi", "retinal hemangioblastoma")
-        #
-        # # tcf function
-        # self.t_c_f_function = fenics.interpolate(fenics.Constant(0.), self.V.sub(0).collapse())
-        # self.t_c_f_function.rename("tcf", "tip cells function")
-        #
-        # # af
-        # logger.info(f"{self.out_folder_name}:Loading af... ")
-        # self.af_old = fenics.Function(self.V.sub(0).collapse())
-        # resume_af_xdmf = fenics.XDMFFile(str(self.__resume_files_dict["af.xdmf"]))
-        # with resume_af_xdmf as infile:
-        #     infile.read_checkpoint(self.af_old, "af", 0)
-        # self.af_old.rename("af", "angiogenic factor")
-        #
-        # # af gradient
-        # logger.info(f"{self.out_folder_name}:Loading af_grad... ")
-        # self.ge = GradientEvaluator()
-        # self.grad_af_old = fenics.Function(self.vec_V)
-        # resume_grad_af_xdmf = fenics.XDMFFile(str(self.__resume_files_dict["grad_af.xdmf"]))
-        # with resume_grad_af_xdmf as infile:
-        #     infile.read_checkpoint(self.grad_af_old, "grad_af", 0)
-        # self.grad_af_old.rename("grad_af", "angiogenic factor gradient")
-        #
-        # # define tip cell manager
-        # if rank == 0:
-        #     initial_tcs = load_tip_cells_from_json(str(self.__resume_files_dict["tipcells.json"]))
-        # else:
-        #     initial_tcs = None
-        # initial_tcs = comm_world.bcast(initial_tcs, 0)
-        # self.tip_cell_manager = TipCellManager(self.mesh,
-        #                                        self.sim_parameters,
-        #                                        initial_tcs=initial_tcs)
-        #
-        # # definie initial time
-        # self.t0 = last_step
 
     def _write_files(self, t: int, write_mesh: bool = False):
 
@@ -716,7 +569,6 @@ class RHTimeSimulation(RHSimulation):
                 f_file.write_mesh(self.mesh)
             # write function
             fun.name = name
-            print(fun.function_space is self.vec_V)
             if self.save_distributed_files and (not (fun.function_space in [self.subV0_collapsed, self.vec_V])):
                 # for pvd files, save collapsed function (if the function is a sub-function of u)
                 collapsed_function = fun.collapse()
@@ -816,10 +668,6 @@ class RHTimeSimulation(RHSimulation):
             self.pbar.update(1)
 
     def _end_simulation(self):
-        # save resume info
-        if self.write_checkpoints:
-            self._save_resume_info()
-
         # close files
         self.c_file.close()
         self.af_file.close()
@@ -833,121 +681,6 @@ class RHTimeSimulation(RHSimulation):
             rmtree_if_exists_once_per_node(self.distributed_data_folder)
 
         super()._end_simulation()
-
-    def _save_resume_info(self):
-        """
-        Save the mesh and/or the fenics Functions in a resumable format (i.e. using the FEniCS function
-        `write_checkpoint`).
-        """
-        raise NotImplementedError("Resuming not implemented yet")
-        # logger.info("Starting checkpoint write")
-        #
-        # # init list of saved file
-        # saved_files = {}
-        #
-        # # copy cached mesh in resume folder
-        # for mf in self.cache_mesh_folder.glob("mesh.*"):
-        #     shutil.copy(mf, self.resume_folder)
-        #
-        # # write functions
-        # fnc_dict = {"af": self.af_old, "c": self.c_old, "mu": self.mu_old, "phi": self.phi, "grad_af": self.grad_af_old}
-        # for name, fnc in fnc_dict.items():
-        #     file_name = f"{self.resume_folder}/{name}.xdmf"
-        #     with fenics.XDMFFile(file_name) as outfile:
-        #         logger.info(f"Checkpoint writing of {name}....")
-        #         outfile.write_checkpoint(fnc, name, 0, fenics.XDMFFile.Encoding.HDF5, False)
-        #     saved_files[name] = str(Path(file_name).resolve())
-        #
-        # # store tip cells position
-        # file_name = f"{self.resume_folder}/tipcells.json"
-        # self.tip_cell_manager.save_tip_cells(file_name)
-        # saved_files["tipcells"] = str(Path(file_name).resolve())
-
-    @classmethod
-    def resume(cls,
-               resume_from: Path,
-               steps: int,
-               save_rate: int,
-               out_folder_name: str = mansim.default_data_folder_name,
-               out_folder_mode: str = None,
-               sim_rationale: str = "No comment",
-               slurm_job_id: int = None,
-               write_checkpoints: bool = True):
-        """
-        Resume a simulation stored in a given folder.
-
-        :param resume_from: folder containing the simulation data to be resumed. It must contain a ``resume`` folder
-        (e.g. if ``resume_from=/home/user/my_sim``, there must be a ``/home/user/my_sim/resume`` folder).
-        :param steps: number of simulation steps.
-        :param save_rate: specify how often the simulation status will be stored (e.g. if ``save_rate=10``, it will be
-        stored every 10 steps). The last simulation step is always saved.
-        :param out_folder_name: name for the simulation. It will be used to name the folder containing the output of the
-        simulation (e.g. ``saved_sim/sim_name``).
-        :param out_folder_mode: if ``None``, the output folder name will be exactly the one specified in
-        out_folder_name; if ``datetime``, the output folder name will be also followed by a string containing the date
-        and the time of the simulation (e.g. ``saved_sim/my_sim/2022-09-25_15-51-17-610268``). The latter is
-        recommended to run multiple simulations of the same kind. Default is ```None``.
-        :param sim_rationale: provide a rationale for running this simulation (e.g. checking the effect of this
-        parameter). It will be added to the simulation report contained in
-        ``saved_sim/sim_name/sim_info/sim_info.html``. Default is "No comment".
-        :param slurm_job_id: slurm job ID assigned to the simulation, if performed with slurm. It is used to generate a
-        pbar stored in ``slurm/<slurm job ID>.pbar``.
-        :param write_checkpoints: set to True to save simulation with checkpoints
-        """
-        # ----------------------------------------------------------------------------------------------------------- #
-        # 1. Check resume folder consistency
-        # ----------------------------------------------------------------------------------------------------------- #
-        logger.info(f"{out_folder_name}: Checking if it's possible to resume simulation ... ")
-
-        # init error msg
-        error_msg_preamble = "Not enough info to resume."
-
-        # check if all relevant files exist
-        input_report_folder = resume_from / Path("sim_info")
-        sim_parameters_csv = input_report_folder / Path("sim_parameters.csv")
-        mesh_parameters_csv = input_report_folder / Path("mesh_parameters.csv")
-        input_incremental_tip_cells = input_report_folder / Path("incremental_tipcells.json")
-        patient_parameters_file = input_report_folder / Path("patient_parameters.json")
-        input_resume_folder = resume_from / Path("resume")
-        resume_files = ["mesh.xdmf", "af.xdmf", "c.xdmf", "grad_af.xdmf", "mu.xdmf", "phi.xdmf", "tipcells.json"]
-        resume_files_dict = {file_name: input_resume_folder / Path(file_name)
-                             for file_name in resume_files}
-        resume_files_dict["incremental_tip_cells.json"] = input_incremental_tip_cells
-        resume_files_dict["mesh_parameters.csv"] = mesh_parameters_csv
-        for f in [sim_parameters_csv, input_resume_folder, patient_parameters_file, *resume_files_dict.values()]:
-            if not f.exists():
-                raise RuntimeError(f"{error_msg_preamble} {f} is missing.")
-
-        # ----------------------------------------------------------------------------------------------------------- #
-        # 2. Generate simulation from resumed data
-        # ----------------------------------------------------------------------------------------------------------- #
-        # compute spatial dimension
-        mesh_parameters = read_parameters(mesh_parameters_csv)
-        if mesh_parameters.is_value_present("Lz"):
-            spatial_dimension = 3
-        else:
-            spatial_dimension = 2
-
-        # load simulation parameters
-        sim_parameters = read_parameters(sim_parameters_csv)
-
-        # load patient parameters
-        patient_parameters = load_json(patient_parameters_file)
-
-        # init simulation obj
-        simulation = cls(spatial_dimension=spatial_dimension,
-                         sim_parameters=sim_parameters,
-                         patient_parameters=patient_parameters,
-                         steps=steps,
-                         save_rate=save_rate,
-                         out_folder_name=out_folder_name,
-                         out_folder_mode=out_folder_mode,
-                         sim_rationale=sim_rationale,
-                         slurm_job_id=slurm_job_id,
-                         write_checkpoints=write_checkpoints)
-        simulation.__resumed = True
-        simulation.__resume_files_dict = resume_files_dict
-        return simulation
 
 
 class RHAdaptiveSimulation(RHTimeSimulation):
@@ -1141,7 +874,9 @@ class RHAdaptiveSimulation(RHTimeSimulation):
             project(ufl.grad(self.af_old), target_func=self.grad_af_old)
 
             # save
-            if ((self.t - self.last_writing_time) < self.save_rate) or (self.t == self.steps) or self.runtime_error_occurred:
+            if (((self.t - self.last_writing_time) < self.save_rate)
+                    or (self.t == self.steps)
+                    or self.runtime_error_occurred):
                 self._write_files(self.t)
                 self.last_writing_time = self.t
 
@@ -1164,9 +899,7 @@ class RHMeshAdaptiveSimulation(RHAdaptiveSimulation):
                  out_folder_mode: str = None,
                  sim_rationale: str = "No comment",
                  slurm_job_id: int = None,
-                 load_from_cache: bool = False,
-                 write_checkpoints: bool = True,
-                 save_distributed_files_to: str or None = None,
+                 save_distributed_files_to = None,
                  refine_rate: int = 5):
         super().__init__(spatial_dimension,
                          sim_parameters,
@@ -1177,12 +910,11 @@ class RHMeshAdaptiveSimulation(RHAdaptiveSimulation):
                          out_folder_mode,
                          sim_rationale,
                          slurm_job_id,
-                         load_from_cache,
-                         write_checkpoints,
                          save_distributed_files_to)
         self.refine_rate = refine_rate
         self.refine_counter = 0
-        self.R_c = self.sim_parameters.get_value("R_c")
+        self.Tc = self.sim_parameters.get_value("T_c")
+        self.Gm = self.sim_parameters.get_value("G_m")
         self.stop_adapting = False
 
     def _spatial_discretization(self, mesh: dolfinx.mesh.Mesh = None):
@@ -1193,105 +925,98 @@ class RHMeshAdaptiveSimulation(RHAdaptiveSimulation):
         self.subV1_collapsed, self.collapsedV1_to_V = self.V.sub(1).collapse()
         self.subV2_collapsed, self.collapsedV2_to_V = self.V.sub(2).collapse()
 
-    def _get_tip_cells_marker(self, h: float):
+    def _generate_coarse_mesh(self):
+        logger.info(f"Generating coarse mesh")
+        self.coarse_mesh, _ = compute_mesh(self.spatial_dimension,
+                                           self.sim_parameters,
+                                           self.patient_parameters,
+                                           self.ureg,
+                                           n_factor=0.1)
+
+    def _get_high_af_residual_edges(self, adapted_mesh):
+        logger.debug(f"AF based refinement")
+        # init dt constant
+        dt_constant = dolfinx.fem.Constant(adapted_mesh, dolfinx.default_scalar_type(self.dt_constant.value))
+
+        # interpolate function on adapted function space
+        a_af_old = nmm_interpolate(dolfinx.fem.Function(self.subV0_collapsed), self.af_old.collapse())
+        a_c_old = nmm_interpolate(dolfinx.fem.Function(self.subV1_collapsed), self.c_old.collapse())
+        a_phi = dolfinx.fem.Function(self.subV0_collapsed)
+        a_phi.interpolate(self.phi_expression.eval)
+        a_phi.x.scatter_forward()
+
+        # define residual form
+        res_v = ufl.TestFunction(self.subV0_collapsed)
+        af_residual = src.forms.angiogenic_factors_form_dt(a_af_old, a_af_old, a_phi, a_c_old, res_v,
+                                                           self.sim_parameters,
+                                                           dt=dt_constant)
+        # assemble residual form
+        R_af = dolfinx.fem.petsc.assemble_vector(dolfinx.fem.form(af_residual))
+        R_af.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+
+        # create connectivity between vertices and edges
+        adapted_mesh.topology.create_connectivity(0, 1)
+
+        # get vertices where the residual of af is higher
+        high_res_vertices, = np.nonzero(np.abs(R_af.array) > self.mesh_refinement_tol)  # check higher
+        # get edges connected to vertices where the residual is higher
+        high_res_edges = dolfinx.mesh.compute_incident_entities(adapted_mesh.topology,
+                                                                high_res_vertices.astype(np.int32),
+                                                                0,
+                                                                1)
+        return high_res_edges
+
+    def _get_c_gradient_based_marker(self, adapted_mesh):
+        logger.debug(f"Computing c gradient")
+        # compute c_DG
+        DG = dolfinx.fem.FunctionSpace(adapted_mesh, ("DG", 0))
+        c_DG = nmm_interpolate(dolfinx.fem.Function(DG), self.c_old.collapse())
+        c_DG.x.array[:] = np.sqrt(c_DG.x.array ** 2)
+        c_DG.x.scatter_forward()
+
+        # compute c_DG infinity norm
+        c_DG_infty_norm = self.mesh.comm.allreduce(np.amax(c_DG.x.array), op=MPI.MAX)
+
+        # create connectivity between vertices and edges
+        adapted_mesh.topology.create_connectivity(adapted_mesh.topology.dim, 1)
+
+        # get cells where the residual of af is higher
+        far_from_eq_cells, = np.nonzero((c_DG.x.array / c_DG_infty_norm) < self.c_threshold)  # check higher
+        # get edges connected to vertices where the residual is higher
+        far_from_eq_edges = dolfinx.mesh.compute_incident_entities(adapted_mesh.topology,
+                                                                   far_from_eq_cells.astype(np.int32),
+                                                                   adapted_mesh.topology.dim,
+                                                                   1)
+
+        return far_from_eq_edges
+
+    def _get_possible_tip_cells_position_marker(self, adapted_mesh):
+        adapted_mesh_bbt = dolfinx.geometry.bb_tree(adapted_mesh, adapted_mesh.topology.dim)
+
         def marker(x):
-            # compute distance of each point x from each center
-            distance_from_centers = np.ones(len(x[0])) * np.infty
-            for tc in self.tip_cell_manager.get_global_tip_cells_list():
-                tcp = tc.get_position()
-                current_d = np.sqrt((((x[0] - tcp[0]) ** 2) + ((x[1] - tcp[1]) ** 2) + ((x[2] - tcp[2]) ** 2)))
-                distance_from_centers[current_d < distance_from_centers] = current_d[current_d < distance_from_centers]
-            # get is in border
-            is_in_border = ((self.R_c + h) < distance_from_centers) & (distance_from_centers < (self.R_c + h))
-            return is_in_border
+            # get points and cells on proc
+            points_on_proc, cells = fu.get_colliding_cells_for_points(x.T, adapted_mesh, adapted_mesh_bbt)
+            # get af values
+            af_above_Tc = self.af_old.eval(points_on_proc, cells) >= self.Tc
+            grad_af_above_Gm = np.linalg.norm(self.grad_af_old.eval(points_on_proc, cells)) >= self.Gm
+            return af_above_Tc & grad_af_above_Gm
 
         return marker
 
     def _adapt_mesh(self):
-        logger.info(f"Generating coarse mesh")
-        adapted_mesh, _ = compute_mesh(self.spatial_dimension,
-                                       self.sim_parameters,
-                                       self.patient_parameters,
-                                       self.ureg,
-                                       n_factor=0.1)
+        # init adapted mesh
+        edges = []
+        self.coarse_mesh.topology.create_entities(1)
+        adapted_mesh = dolfinx.mesh.refine(self.coarse_mesh, edges, redistribute=False)
 
-        len_high_res_edges = 0  # init high_res_edges
-        high_res_edges = []
+        # init high af res
+        global_len_high_af_res = 1
+        high_res_edges = np.array([])
 
+        # start refinement
         logger.info(f"Starting refinement")
         for refinement_cycle in range(self.max_mesh_refinement_cycles):
             logging.info(f"time {self.t} | refinement cycle {refinement_cycle}")
-
-            # define new function spaces
-            self._spatial_discretization(adapted_mesh)
-
-            # interpolate c
-            a_c_old = nmm_interpolate(dolfinx.fem.Function(self.subV1_collapsed), self.c_old.collapse())
-
-            # -------------------------------------------------------------------------------------------------------- #
-            # Refinement based on af residual
-            # -------------------------------------------------------------------------------------------------------- #
-            # if the residual from last step was too high, do refinement
-            if (refinement_cycle == 0) or (len_high_res_edges > 0):
-                logger.debug(f"AF based refinement")
-                # init dt constant
-                dt_constant = dolfinx.fem.Constant(adapted_mesh, dolfinx.default_scalar_type(self.dt_constant.value))
-
-                # generate collapsed functions for af_old and c_old
-                a_af_old = nmm_interpolate(dolfinx.fem.Function(self.subV0_collapsed), self.af_old.collapse())
-
-                # interpolate phi from the last step
-                a_phi = nmm_interpolate(dolfinx.fem.Function(self.subV0_collapsed), self.phi)
-
-                # define weak form for af
-                res_af = dolfinx.fem.Function(self.subV0_collapsed)
-                res_v = ufl.TestFunction(self.subV0_collapsed)
-                af_form = src.forms.angiogenic_factors_form_dt(res_af, a_af_old, a_phi, a_c_old, res_v,
-                                                               self.sim_parameters, dt=dt_constant)
-
-                problem = dolfinx.fem.petsc.NonlinearProblem(af_form, res_af)
-
-                # define solver
-                solver = NewtonSolver(comm_world, problem)
-                solver.report = True  # report iterations
-                # set options for krylov solver
-                opts = PETSc.Options()
-                option_prefix = solver.krylov_solver.getOptionsPrefix()
-                for o, v in self.lsp.items():
-                    opts[f"{option_prefix}{o}"] = v
-                solver.krylov_solver.setFromOptions()
-
-                # solve
-                try:
-                    solver.solve(res_af)
-                except RuntimeError as e:
-                    # store error info
-                    self.runtime_error_occurred = True
-                    self.error_msg = str(e)
-                    logger.error(str(e))
-                    break
-
-                # compute af residual for refinement
-                af_residual = src.forms.angiogenic_factors_form_dt(res_af, res_af, a_phi, a_c_old, res_v,
-                                                                   self.sim_parameters,
-                                                                   dt=dt_constant)
-                R_af = dolfinx.fem.petsc.assemble_vector(dolfinx.fem.form(af_residual))
-                R_af.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
-
-                # create connectivity between vertices and edges
-                adapted_mesh.topology.create_connectivity(0, 1)
-
-                # get vertices where the residual of af is higher
-                high_res_vertices, = np.nonzero(np.abs(R_af.array) > self.mesh_refinement_tol)  # check higher
-                # get edges connected to vertices where the residual is higher
-                high_res_edges = dolfinx.mesh.compute_incident_entities(adapted_mesh.topology,
-                                                                        high_res_vertices.astype(np.int32),
-                                                                        0,
-                                                                        1)
-                # compute global len of high_res_edges
-                local_len_high_res_edges = len(high_res_edges)
-                len_high_res_edges = comm_world.allreduce(local_len_high_res_edges, op=MPI.SUM)
-
             # -------------------------------------------------------------------------------------------------------- #
             # Check min h value; if reached the target, stop refining
             # -------------------------------------------------------------------------------------------------------- #
@@ -1301,8 +1026,6 @@ class RHMeshAdaptiveSimulation(RHAdaptiveSimulation):
             local_h_min = np.amin(local_h)
             global_h_min = comm_world.allreduce(local_h_min, MPI.MIN)
             order_of_magnitude_global_h_min = 10 ** np.floor(np.log10(global_h_min))
-
-            # check h min. If h_min reached the target, stop refining. Else, continue
             if order_of_magnitude_global_h_min < self.mesh_refinement_epsilon:
                 logger.info(
                     f"O(h) [O({global_h_min})] < epsilon ({self.mesh_refinement_epsilon}): "
@@ -1315,44 +1038,29 @@ class RHMeshAdaptiveSimulation(RHAdaptiveSimulation):
                     f"keep refining"
                 )
 
-            # -------------------------------------------------------------------------------------------------------- #
-            # Refinement based on c gradient
-            # -------------------------------------------------------------------------------------------------------- #
-            logger.debug(f"C gradient based refinement")
-            # create connectivity between cells and edges
-            adapted_mesh.topology.create_connectivity(adapted_mesh.topology.dim, 1)
+            # generate adapted function space
+            self._spatial_discretization(adapted_mesh)
 
-            # compute c vertices far from equilibrium (which are not 1 or -1)
-            c_DG = dolfinx.fem.Function(dolfinx.fem.FunctionSpace(adapted_mesh, ("DG", 0)))
-            c_DG.interpolate(a_c_old)
-            c_DG.x.scatter_forward()
-            c_DG.x.array[:] = np.sqrt(c_DG.x.array ** 2)
-            c_DG.x.scatter_forward()
-            c_DG_infty_norm = self.mesh.comm.allreduce(np.amax(c_DG.x.array), op=MPI.MAX)
-            far_from_eq_cells, = np.nonzero((c_DG.x.array / c_DG_infty_norm) < 0.35)
-            far_from_eq_edges = dolfinx.mesh.compute_incident_entities(adapted_mesh.topology,
-                                                                       far_from_eq_cells.astype(np.int32),
-                                                                       adapted_mesh.topology.dim,
-                                                                       1)
-
-            # -------------------------------------------------------------------------------------------------------- #
-            # Refinement based on TC position
-            # -------------------------------------------------------------------------------------------------------- #
-            logger.debug(f"TC position based refinement")
+            # locate edges to refine for af residual
+            if global_len_high_af_res > 0:
+                high_res_edges = self._get_high_af_residual_edges(adapted_mesh)
+                global_len_high_af_res = comm_world.allreduce(len(high_res_edges), MPI.SUM)
+            far_from_eq_edges = self._get_c_gradient_based_marker(adapted_mesh)
             tip_cells_edges = dolfinx.mesh.locate_entities(adapted_mesh,
                                                            1,
-                                                           self._get_tip_cells_marker(global_h_min/2))
+                                                           self._get_possible_tip_cells_position_marker(adapted_mesh))
 
             # merge edges
             logging.debug(f"af high res edges to refine: {len(high_res_edges)}")
             logging.debug(f"far from eq edges to refine: {len(far_from_eq_edges)}")
             logging.debug(f"tip cell edges to refine: {len(tip_cells_edges)}")
-            edges = np.append(high_res_edges, far_from_eq_edges)
-            edges = np.append(edges, tip_cells_edges)
+            # edges = np.append(high_res_edges, far_from_eq_edges)
+            edges = np.append(far_from_eq_edges, tip_cells_edges)
             edges = np.unique(edges.astype(np.int32))
 
             # refine mesh
             logger.debug(f"Mesh refinement")
+            adapted_mesh.topology.create_entities(1)
             adapted_mesh = dolfinx.mesh.refine(adapted_mesh, edges, redistribute=False)
 
         # set new mesh
@@ -1362,72 +1070,100 @@ class RHMeshAdaptiveSimulation(RHAdaptiveSimulation):
         """
         Solve problem using adaptive mesh refinement based on residual
         """
-        # if self.refine_counter % self.refine_rate == 0:
-        # adapt mesh
-        self._adapt_mesh()
+        if (self.refine_counter % self.refine_rate == 0) and (not self.stop_adapting):
+            # adapt mesh
+            self._adapt_mesh()
 
-        # update counter
+            # set dt constant
+            self.dt_constant = dolfinx.fem.Constant(self.mesh, dolfinx.default_scalar_type(self.dt_constant.value))
+
+            # regenerate spatial discretization
+            self._spatial_discretization()
+
+            # interpolate old state on new mesh
+            logger.debug(f"NMM interpolate")
+            a_af_old = nmm_interpolate(dolfinx.fem.Function(self.subV0_collapsed), self.af_old.collapse())
+            a_c_old = nmm_interpolate(dolfinx.fem.Function(self.subV1_collapsed), self.c_old.collapse())
+            a_mu_old = nmm_interpolate(dolfinx.fem.Function(self.subV2_collapsed), self.mu_old.collapse())
+            # interpolate phi on the new mesh
+            self.phi = dolfinx.fem.Function(self.subV0_collapsed)
+            self.phi.interpolate(self.phi_expression.eval)
+            self.phi.x.scatter_forward()
+
+            # create u_old to keep all the functions
+            logger.debug(f"Assign to u_old")
+            self.u_old = dolfinx.fem.Function(self.V)
+            self.u_old.x.array[self.collapsedV0_to_V] = a_af_old.x.array
+            self.u_old.x.array[self.collapsedV1_to_V] = a_c_old.x.array
+            self.u_old.x.array[self.collapsedV2_to_V] = a_mu_old.x.array
+            self.u_old.x.scatter_forward()
+
+            # overwrite previous state
+            self.af_old, self.c_old, self.mu_old = self.u_old.split()
+
+            # create u
+            self.u = dolfinx.fem.Function(self.V)
+            self.u.x.array[:] = self.u_old.x.array
+            self.u.x.scatter_forward()
+
+            # generate weak form
+            logger.debug(f"Define problem")
+            af, c, mu = ufl.split(self.u)
+            v1, v2, v3 = ufl.TestFunctions(self.V)
+            af_form = src.forms.angiogenic_factors_form_dt(af, self.af_old, self.phi, c, v1, self.sim_parameters,
+                                                           dt=self.dt_constant)
+            capillaries_form = src.forms.angiogenesis_form_no_proliferation(
+                c, self.c_old, mu, self.mu_old, v2, v3, self.sim_parameters, dt=self.dt_constant)
+            form = af_form + capillaries_form
+
+            # define problem
+            logger.info(f"{self.out_folder_name}:Defining problem...")
+            problem = dolfinx.fem.petsc.NonlinearProblem(form, self.u)
+
+            # define solver
+            self.solver = NewtonSolver(comm_world, problem)
+            self.solver.report = True  # report iterations
+            # set options for krylov solver
+            opts = PETSc.Options()
+            option_prefix = self.solver.krylov_solver.getOptionsPrefix()
+            for o, v in self.lsp.items():
+                opts[f"{option_prefix}{o}"] = v
+            self.solver.krylov_solver.setFromOptions()
+
         self.refine_counter += 1
 
-        # set dt constant
-        self.dt_constant = dolfinx.fem.Constant(self.mesh, dolfinx.default_scalar_type(self.dt_constant.value))
+    def _active_tc_routine(self):
+        self._set_up_adaptive_problem()
 
-        # interpolate old state on new mesh
-        a_af_old = nmm_interpolate(dolfinx.fem.Function(self.subV0_collapsed), self.af_old.collapse())
-        a_c_old = nmm_interpolate(dolfinx.fem.Function(self.subV1_collapsed), self.c_old.collapse())
-        a_mu_old = nmm_interpolate(dolfinx.fem.Function(self.subV2_collapsed), self.mu_old.collapse())
+        # set dt value to min
+        self.dt_constant.value = self.min_dt
 
-        # create u_old to keep all the functions
-        self.u_old = dolfinx.fem.Function(self.V)
-        self.u_old.x.array[self.collapsedV0_to_V] = a_af_old.x.array
-        self.u_old.x.array[self.collapsedV1_to_V] = a_c_old.x.array
-        self.u_old.x.array[self.collapsedV2_to_V] = a_mu_old.x.array
-        self.u_old.x.scatter_forward()
+        # manage tip cells
+        self.tip_cell_manager.activate_tip_cell(self.c_old, self.af_old, self.grad_af_old, self.t)
+        self.tip_cell_manager.revert_tip_cells(self.af_old, self.grad_af_old)
+        self.tip_cell_manager.move_tip_cells(self.c_old, self.af_old, self.grad_af_old)
 
-        # overwrite previous state
-        self.af_old, self.c_old, self.mu_old = self.u_old.split()
+        # store tip cells in fenics function and json file
+        self.t_c_f_function = self.tip_cell_manager.get_latest_tip_cell_function()
+        self.t_c_f_function.x.scatter_forward()
+        self.tip_cell_manager.save_incremental_tip_cells(f"{self.report_folder}/incremental_tipcells.json", self.t)
 
-        # interpolate phi on the new mesh
-        self.phi = nmm_interpolate(dolfinx.fem.Function(self.subV0_collapsed), self.phi)
-
-        # create u
-        self.u = dolfinx.fem.Function(self.V)
-        self.u.x.array[:] = self.u_old.x.array
-        self.u.x.scatter_forward()
-
-        # generate weak form
-        af, c, mu = ufl.split(self.u)
-        v1, v2, v3 = ufl.TestFunctions(self.V)
-        af_form = src.forms.angiogenic_factors_form_dt(af, self.af_old, self.phi, c, v1, self.sim_parameters,
-                                                       dt=self.dt_constant)
-        capillaries_form = src.forms.angiogenesis_form_no_proliferation(
-            c, self.c_old, mu, self.mu_old, v2, v3, self.sim_parameters, dt=self.dt_constant)
-        form = af_form + capillaries_form
-
-        # define problem
-        logger.info(f"{self.out_folder_name}:Defining problem...")
-        problem = dolfinx.fem.petsc.NonlinearProblem(form, self.u)
-
-        # define solver
-        self.solver = NewtonSolver(comm_world, problem)
-        self.solver.report = True  # report iterations
-        # set options for krylov solver
-        opts = PETSc.Options()
-        option_prefix = self.solver.krylov_solver.getOptionsPrefix()
-        for o, v in self.lsp.items():
-            opts[f"{option_prefix}{o}"] = v
-        self.solver.krylov_solver.setFromOptions()
-
-    def _solve_problem(self):
-        if not self.stop_adapting:
-            logger.info(f"Set up refined mesh")
-            self._set_up_adaptive_problem()
+        # solve
         super()._solve_problem()
+
+        # update time
+        self.t += self.dt_constant.value
+
+        # assign new value to phi
+        self.phi_expression.update_time(self.t)
+        self.phi.interpolate(self.phi_expression.eval)
+        self.phi.x.scatter_forward()
 
     def _time_iteration(self, test_convergence: bool = False):
         # set tolerance for spatial-refinement
         self.mesh_refinement_tol = 1e-5
         self.max_mesh_refinement_cycles = 15
+        self.c_threshold = 0.35
         self.mesh_refinement_epsilon = np.sqrt(self.sim_parameters.get_value("epsilon"))
 
         # get dt values for time-adaptive solution
@@ -1438,6 +1174,9 @@ class RHMeshAdaptiveSimulation(RHAdaptiveSimulation):
         # init time iteration
         self.t = int(np.round(self.t0))
         super()._set_pbar(total=self.steps)
+
+        # init coarse mesh and spatial discretization
+        self._generate_coarse_mesh()
 
         # log
         logger.info(f"{self.out_folder_name}:Starting time iteration...")
@@ -1517,9 +1256,7 @@ class RHTestTipCellActivation(RHSimulation):
                  out_folder_name: str = mansim.default_data_folder_name,
                  out_folder_mode: str = None,
                  sim_rationale: str = "No comment",
-                 slurm_job_id: int = None,
-                 load_from_cache: bool = False,
-                 write_checkpoints: bool = True):
+                 slurm_job_id: int = None):
         # init super class
         super().__init__(spatial_dimension=spatial_dimension,
                          sim_parameters=standard_params,
@@ -1527,9 +1264,7 @@ class RHTestTipCellActivation(RHSimulation):
                          out_folder_name=out_folder_name,
                          out_folder_mode=out_folder_mode,
                          sim_rationale=sim_rationale,
-                         slurm_job_id=slurm_job_id,
-                         load_from_cache=load_from_cache,
-                         write_checkpoints=write_checkpoints)
+                         slurm_job_id=slurm_job_id)
 
         self.df_standard_params: pd.DataFrame = self.sim_parameters.as_dataframe()
 
@@ -1594,8 +1329,7 @@ class RHTestTipCellActivation(RHSimulation):
         return self.runtime_error_occurred
 
     def _sim_mkdir(self):
-        super()._sim_mkdir_list(self.data_folder, self.report_folder, self.reproduce_folder,
-                                self.cache_mesh_folder, self.cache_c0_folder)
+        super()._sim_mkdir_list(self.data_folder, self.report_folder, self.reproduce_folder)
 
     def _generate_test_parameters(self, **kwargs):
         """ Generate dictionary with ranges of parameters to test """
@@ -1652,136 +1386,3 @@ class RHTestTipCellActivation(RHSimulation):
             self.sim_rationale += f"- {p}: {l}\n"
 
         super()._end_simulation()
-
-
-def run_simulation(spatial_dimension: int,
-                   sim_parameters: Parameters,
-                   patient_parameters: Dict,
-                   steps: int,
-                   save_rate: int = 1,
-                   out_folder_name: str = mansim.default_data_folder_name,
-                   out_folder_mode: str = None,
-                   sim_rationale: str = "No comment",
-                   slurm_job_id: int = None,
-                   recompute_mesh: bool = False,
-                   recompute_c0: bool = False,
-                   write_checkpoints: bool = True,
-                   save_distributed_files_to: str or None = None):
-    """
-    Run a simulation and store the result
-
-    :param spatial_dimension: specify if the simulation will be in 2D or 3D.
-    :param sim_parameters: parameters to be used in the simulation.
-    :param patient_parameters:
-    :param steps: number of simulation steps.
-    :param save_rate: specify how often the simulation status will be stored (e.g. if ``save_rate=10``, it will be
-    stored every 10 steps). The last simulation step is always saved.
-    :param out_folder_name: name for the folder containing the output of the simulation (e.g. if
-    ``out_folder_name`` is ``my_sim``, the output folder will be ``saved_sim/my_sim``).
-    :param out_folder_mode: if ``None``, the output folder name will be exactly the one specified in out_folder_name; if
-    ``datetime``, the output folder name will be also followed by a string containing the date and the time of the
-    simulation (e.g. ``saved_sim/my_sim/2022-09-25_15-51-17-610268``). The latter is recommended to run multiple
-    simulations of the same kind. Default is ```None``.
-    :param sim_rationale: provide a rationale for running this simulation (e.g. checking the effect of this parameter).
-    It will be added to the simulation report contained in ``saved_sim/sim_name/sim_info/sim_info.html``. Default is
-    "No comment".
-    :param slurm_job_id: slurm job ID assigned to the simulation, if performed with slurm. It is used to generate a pbar
-    stored in ``slurm/<slurm job ID>.pbar``.
-    to choose between two similar versions of the vessel images (see ``notebooks/vessels_image_processing.ipynb``). No
-    difference in the simulations results was found using one image or another.
-    :param recompute_mesh: recompute the mesh for the simulation
-    :param recompute_c0: recompute c0 for the simulation. If False, the most recent c0 is used. Default is False.
-    :param write_checkpoints: set to True to save simulation with checkpoints
-    :param save_distributed_files_to: set where the distributed files should be saved on the local node file system.
-    """
-    # ---------------------------------------------------------------------------------------------------------------- #
-    #                                                 Init Simulation
-    # ---------------------------------------------------------------------------------------------------------------- #
-
-    # init simulation object
-    simulation = RHTimeSimulation(
-        spatial_dimension=spatial_dimension,
-        sim_parameters=sim_parameters,
-        patient_parameters=patient_parameters,
-        steps=steps,
-        save_rate=save_rate,
-        out_folder_name=out_folder_name,
-        out_folder_mode=out_folder_mode,
-        sim_rationale=sim_rationale,
-        slurm_job_id=slurm_job_id,
-        load_from_cache=(not recompute_mesh) or (not recompute_c0),
-        write_checkpoints=write_checkpoints,
-        save_distributed_files_to=save_distributed_files_to
-    )
-    # run simulation
-    simulation.run()
-
-    return simulation.runtime_error_occurred
-
-
-def resume_simulation(resume_from: str,
-                      steps: int,
-                      save_rate: int = 1,
-                      out_folder_name: str = mansim.default_data_folder_name,
-                      out_folder_mode: str = None,
-                      sim_rationale: str = "No comment",
-                      slurm_job_id: int = None,
-                      write_checkpoints: bool = True):
-    """
-    Resume a simulation stored in a given folder.
-
-    :param resume_from: folder containing the simulation data to be resumed. It must contain a ``resume`` folder
-    (e.g. if ``resume_from=/home/user/my_sim``, there must be a ``/home/user/my_sim/resume`` folder).
-    :param steps: number of simulation steps.
-    :param save_rate: specify how often the simulation status will be stored (e.g. if ``save_rate=10``, it will be
-    stored every 10 steps). The last simulation step is always saved.
-    :param out_folder_name: name for the simulation. It will be used to name the folder containing the output of the
-    simulation (e.g. ``saved_sim/sim_name``).
-    :param out_folder_mode: if ``None``, the output folder name will be exactly the one specified in out_folder_name; if
-    ``datetime``, the output folder name will be also followed by a string containing the date and the time of the
-    simulation (e.g. ``saved_sim/my_sim/2022-09-25_15-51-17-610268``). The latter is recommended to run multiple
-    simulations of the same kind. Default is ```None``.
-    :param sim_rationale: provide a rationale for running this simulation (e.g. checking the effect of this parameter).
-    It will be added to the simulation report contained in ``saved_sim/sim_name/sim_info/sim_info.html``. Default is
-    "No comment".
-    :param slurm_job_id: slurm job ID assigned to the simulation, if performed with slurm. It is used to generate a pbar
-    stored in ``slurm/<slurm job ID>.pbar``.
-    :param write_checkpoints: set to True to save simulation with checkpoints
-    """
-    simulation = RHTimeSimulation.resume(resume_from=Path(resume_from),
-                                         steps=steps,
-                                         save_rate=save_rate,
-                                         out_folder_name=out_folder_name,
-                                         out_folder_mode=out_folder_mode,
-                                         sim_rationale=sim_rationale,
-                                         slurm_job_id=slurm_job_id,
-                                         write_checkpoints=write_checkpoints)
-    # run simulation
-    simulation.run()
-
-    return simulation.runtime_error_occurred
-
-
-def test_tip_cell_activation(spatial_dimension: int,
-                             standard_sim_parameters: Parameters,
-                             patient_parameters: Dict,
-                             out_folder_name: str = mansim.default_data_folder_name,
-                             out_folder_mode: str = None,
-                             sim_rationale: str = "No comment",
-                             slurm_job_id: int = None,
-                             results_df: str = None,
-                             recompute_mesh: bool = False,
-                             recompute_c0: bool = False,
-                             write_checkpoints: bool = True,
-                             **kwargs):
-    simulation = RHTestTipCellActivation(spatial_dimension,
-                                         standard_params=standard_sim_parameters,
-                                         patient_parameters=patient_parameters,
-                                         out_folder_name=out_folder_name,
-                                         out_folder_mode=out_folder_mode,
-                                         sim_rationale=sim_rationale,
-                                         slurm_job_id=slurm_job_id,
-                                         load_from_cache=(not recompute_mesh) or (not recompute_c0),
-                                         write_checkpoints=write_checkpoints)
-
-    return simulation.run(results_df, **kwargs)

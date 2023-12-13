@@ -1,4 +1,3 @@
-import sys
 import json
 import logging
 import time
@@ -8,7 +7,7 @@ import pandas as pd
 import numpy as np
 from mocafe.fenut.parameters import Parameters
 from mpi4py import MPI
-from src.simulation import run_simulation, test_tip_cell_activation, RHAdaptiveSimulation, RHTimeSimulation
+from src.simulation import (RHTimeSimulation, RHTestTipCellActivation, RHAdaptiveSimulation, RHMeshAdaptiveSimulation)
 
 
 # set up logger
@@ -22,7 +21,7 @@ def cli():
                         type=int,
                         help="Slurm job ID for the simulation")
     # add flag for test timulation
-    parser.add_argument("-test_2d",
+    parser.add_argument("-run_2d",
                         action="store_true",
                         help="Run the simulation in 2d to check if everything runs smoothly")
     return parser.parse_args()
@@ -44,7 +43,7 @@ def preamble():
     with open("input_patients_data/patients_parameters.json", "r") as infile:
         patients_parameters = json.load(infile)
 
-    if args.test_2d:
+    if args.run_2d:
         spatial_dimension = 2
         distributed_data_folder = "temp"
     else:
@@ -62,17 +61,15 @@ def test_2d():
     patient1_parameters = patients_parameters["patient1"]
 
     # run simulation for 3 steps
-    run_simulation(spatial_dimension=2,
-                   sim_parameters=sim_parameters,
-                   patient_parameters=patient1_parameters,
-                   steps=3,
-                   save_rate=1,
-                   out_folder_name="test_2d",
-                   sim_rationale="2d test",
-                   recompute_mesh=True,
-                   recompute_c0=True,
-                   write_checkpoints=False,
-                   save_distributed_files_to="test_2d")
+    sim = RHTimeSimulation(spatial_dimension=2,
+                           sim_parameters=sim_parameters,
+                           patient_parameters=patient1_parameters,
+                           steps=3,
+                           save_rate=1,
+                           out_folder_name="test_2d",
+                           sim_rationale="2d test",
+                           save_distributed_files_to="test_2d")
+    sim.run()
 
 
 def compute_initial_condition_for_each_patient():
@@ -89,18 +86,16 @@ def compute_initial_condition_for_each_patient():
         current_patient_parameter = patients_parameters[f"patient{patient_number}"]  # load patient params
 
         # run simulation
-        run_simulation(spatial_dimension=spatial_dimension,
-                       sim_parameters=sim_parameters,
-                       patient_parameters=current_patient_parameter,
-                       steps=0,
-                       save_rate=10,
-                       out_folder_name=f"dolfinx_patient{patient_number}_initial_condition",
-                       sim_rationale=f"Computed initial condition for patient{patient_number}",
-                       slurm_job_id=slurm_job_id,
-                       recompute_mesh=True,
-                       recompute_c0=True,
-                       write_checkpoints=False,
-                       save_distributed_files_to=distributed_data_folder)
+        sim = RHTimeSimulation(spatial_dimension=spatial_dimension,
+                               sim_parameters=sim_parameters,
+                               patient_parameters=current_patient_parameter,
+                               steps=0,
+                               save_rate=10,
+                               out_folder_name=f"dolfinx_patient{patient_number}_initial_condition",
+                               sim_rationale=f"Computed initial condition for patient{patient_number}",
+                               slurm_job_id=slurm_job_id,
+                               save_distributed_files_to=distributed_data_folder)
+        sim.run()
 
 
 def check_tip_cell_activation_for_each_patient():
@@ -137,18 +132,15 @@ def check_tip_cell_activation_for_each_patient():
 
         current_patient_parameter = patients_parameters[f"patient{patient_number}"]  # load patient params
 
-        test_tip_cell_activation(spatial_dimension=spatial_dimension,
-                                 standard_sim_parameters=sim_parameters,
-                                 patient_parameters=current_patient_parameter,
-                                 out_folder_name=f"dolfinx_patient{patient_number}_tip-cell-activation",
-                                 slurm_job_id=slurm_job_id,
-                                 recompute_mesh=True,
-                                 recompute_c0=True,
-                                 tdf_i=tdf_i_range,
-                                 V_pT_af=V_pT_af_range,
-                                 V_uc_af=V_uc_af_range,
-                                 T_c=T_c_range,
-                                 write_checkpoints=False)
+        sim = RHTestTipCellActivation(spatial_dimension=spatial_dimension,
+                                      standard_params=sim_parameters,
+                                      patient_parameters=current_patient_parameter,
+                                      out_folder_name=f"dolfinx_patient{patient_number}_tip-cell-activation",
+                                      slurm_job_id=slurm_job_id)
+        sim.run(tdf_i=tdf_i_range,
+                V_pT_af=V_pT_af_range,
+                V_uc_af=V_uc_af_range,
+                T_c=T_c_range)
 
 
 def tip_cell_activation_patient1():
@@ -166,18 +158,15 @@ def tip_cell_activation_patient1():
                      2.32]  # got from older tip cell activation
 
     # Test tip cell activation
-    test_tip_cell_activation(spatial_dimension=spatial_dimension,
-                             standard_sim_parameters=sim_parameters,
-                             patient_parameters=patients_parameters["patient1"],
-                             out_folder_name=f"dolfinx_patient1_tip-cell-activation",
-                             out_folder_mode="datetime",
-                             slurm_job_id=slurm_job_id,
-                             recompute_mesh=True,
-                             recompute_c0=True,
-                             tdf_i=tdf_i_range,
-                             V_pT_af=V_pT_af_range,
-                             V_uc_af=V_uc_af_range,
-                             write_checkpoints=False)
+    sim = RHTestTipCellActivation(spatial_dimension=spatial_dimension,
+                                  standard_params=sim_parameters,
+                                  patient_parameters=patients_parameters["patient1"],
+                                  out_folder_name=f"dolfinx_patient1_tip-cell-activation",
+                                  out_folder_mode="datetime",
+                                  slurm_job_id=slurm_job_id)
+    sim.run(tdf_i=tdf_i_range,
+            V_pT_af=V_pT_af_range,
+            V_uc_af=V_uc_af_range)
 
 
 def patient1_vascular_sprouting():
@@ -203,25 +192,23 @@ def patient1_vascular_sprouting():
         sim_parameters.set_value("V_uc_af", V_uc_af)
 
         # run simulation
-        run_simulation(spatial_dimension=spatial_dimension,
-                       sim_parameters=sim_parameters,
-                       patient_parameters=patients_parameters["patient1"],
-                       steps=n_steps,
-                       save_rate=50,
-                       out_folder_name="dolfinx_patient1_vascular-sprouting",
-                       out_folder_mode="datetime",
-                       sim_rationale=f"Testing the condition for the activation of the Tip Cells, I found "
+        sim = RHTimeSimulation(spatial_dimension=spatial_dimension,
+                               sim_parameters=sim_parameters,
+                               patient_parameters=patients_parameters["patient1"],
+                               steps=n_steps,
+                               save_rate=50,
+                               out_folder_name="dolfinx_patient1_vascular-sprouting",
+                               out_folder_mode="datetime",
+                               sim_rationale=f"Testing the condition for the activation of the Tip Cells, I found "
                                      f"that when V_pT_af equals the maximum range value ({V_pT_af_max:.2e}) and "
                                      f"V_uc_af = {V_uc_af:.2e} [1 / tau], "
                                      f"the vascular sprouting starts at tdf_i = {tdf_i:.2g} (i.e., when the tumor is "
                                      f"very close to the final dimension. In this simulation, I evaluated the vascular "
                                      f"sprouting for {n_steps} steps, which is the time required to the tumor to "
                                      f"reach the final volume observed in patients.",
-                       slurm_job_id=slurm_job_id,
-                       recompute_mesh=True,
-                       recompute_c0=True,
-                       write_checkpoints=False,
-                       save_distributed_files_to=distributed_data_folder)
+                               slurm_job_id=slurm_job_id,
+                               save_distributed_files_to=distributed_data_folder)
+        sim.run()
 
 
 def tip_cell_activation_patient0_and_2():
@@ -246,19 +233,16 @@ def tip_cell_activation_patient0_and_2():
              f"activation for each condition in {patient}.")
 
         # Test tip cell activation
-        test_tip_cell_activation(spatial_dimension=spatial_dimension,
-                                 standard_sim_parameters=sim_parameters,
-                                 patient_parameters=patients_parameters[patient],
-                                 out_folder_name=f"dolfinx_{patient}_tip-cell-activation",
-                                 out_folder_mode="datetime",
-                                 sim_rationale=sim_rationale,
-                                 slurm_job_id=slurm_job_id,
-                                 recompute_mesh=True,
-                                 recompute_c0=True,
-                                 tdf_i=tdf_i_range,
-                                 V_pT_af=V_pT_af_range,
-                                 V_uc_af=V_uc_af_range,
-                                 write_checkpoints=False)
+        sim = RHTestTipCellActivation(spatial_dimension=spatial_dimension,
+                                      standard_params=sim_parameters,
+                                      patient_parameters=patients_parameters[patient],
+                                      out_folder_name=f"dolfinx_{patient}_tip-cell-activation",
+                                      out_folder_mode="datetime",
+                                      sim_rationale=sim_rationale,
+                                      slurm_job_id=slurm_job_id)
+        sim.run(tdf_i=tdf_i_range,
+                V_pT_af=V_pT_af_range,
+                V_uc_af=V_uc_af_range)
 
 
 def tip_cell_activation_V_pT_and_V_uc_ranges_for_each_patient():
@@ -292,18 +276,16 @@ def tip_cell_activation_V_pT_and_V_uc_ranges_for_each_patient():
              f" to tip cell activation.")
 
         # Test tip cell activation
-        test_tip_cell_activation(spatial_dimension=spatial_dimension,
-                                 standard_sim_parameters=sim_parameters,
-                                 patient_parameters=patients_parameters[patient],
-                                 out_folder_name=f"dolfinx_{patient}_tip-cell-activation",
-                                 out_folder_mode="datetime",
-                                 sim_rationale=sim_rationale,
-                                 slurm_job_id=slurm_job_id,
-                                 recompute_mesh=True,
-                                 recompute_c0=True,
-                                 tdf_i=[min_tdf_i[patient]],
-                                 V_pT_af=V_pT_af_range,
-                                 V_uc_af=V_uc_af_range)
+        sim = RHTestTipCellActivation(spatial_dimension=spatial_dimension,
+                                      standard_params=sim_parameters,
+                                      patient_parameters=patients_parameters[patient],
+                                      out_folder_name=f"dolfinx_{patient}_tip-cell-activation",
+                                      out_folder_mode="datetime",
+                                      sim_rationale=sim_rationale,
+                                      slurm_job_id=slurm_job_id)
+        sim.run(tdf_i=[min_tdf_i[patient]],
+                V_pT_af=V_pT_af_range,
+                V_uc_af=V_uc_af_range)
 
 
 def test_adaptive_vascular_sprouting_for_patient1():
@@ -314,7 +296,7 @@ def test_adaptive_vascular_sprouting_for_patient1():
     sim_parameters_df = sim_parameters.as_dataframe()
 
     # set parameters value leading to sprouting in patient1
-    tdf_i = 0.94  # tdf values for tip cell activation in patient1
+    tdf_i = 0.05  # tdf values for tip cell activation in patient1
     sim_parameters.set_value("tdf_i", tdf_i)
     V_uc_af = 2.32  # V_uc_af values for tip cell activation in patient1
     sim_parameters.set_value("V_uc_af", V_uc_af)
@@ -322,7 +304,7 @@ def test_adaptive_vascular_sprouting_for_patient1():
     sim_parameters.set_value("V_pT_af", V_pT_af_max)
 
     # get number of step to reach the volume observed in patient1
-    n_steps = 3
+    n_steps = int(np.round((np.log(1 / tdf_i) / np.log(float(sim_parameters.get_value("tgr"))))))
 
     # set sim rationale
     sim_rationale = "Testing adaptive solver"
@@ -330,43 +312,14 @@ def test_adaptive_vascular_sprouting_for_patient1():
     # set adaptive_simulation
     simulation = RHAdaptiveSimulation(spatial_dimension=spatial_dimension,
                                       sim_parameters=sim_parameters,
-                                      patient_parameters=patients_parameters["patient1"],
+                                      patient_parameters=patients_parameters["patient0"],
                                       steps=n_steps,
-                                      save_rate=1,
-                                      out_folder_name="dolfinx_patient1_test-vascular-sprouting-adaptive",
+                                      save_rate=10000,
+                                      out_folder_name="dolfinx_patient0_test-vascular-sprouting-adaptive",
                                       sim_rationale=sim_rationale + " | ADAPTIVE",
                                       slurm_job_id=slurm_job_id,
-                                      load_from_cache=False,
-                                      write_checkpoints=False,
                                       save_distributed_files_to=distributed_data_folder)
     simulation.run()
-
-
-def test_different_tipe_steps_patient1():
-    sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, distributed_data_folder = preamble()
-
-    dt_range = [100, 50, 25, 10, 5, 2, 1]
-    n_steps_range = [int(200 / dt) for dt in dt_range]
-
-    for dt, n_steps in zip(dt_range, n_steps_range):
-        sim_parameters.set_value("dt", dt)
-        sim_parameters.set_value("T_c", 100)  # prevent tc activation
-        
-        sim_rationale = f"Testing simulation for dt: {dt}"
-
-        run_simulation(spatial_dimension=spatial_dimension,
-                       sim_parameters=sim_parameters,
-                       patient_parameters=patients_parameters["patient1"],
-                       steps=n_steps,
-                       save_rate=50,
-                       out_folder_name="dolfinx_patient1_test-dt",
-                       out_folder_mode="datetime",
-                       sim_rationale=sim_rationale,
-                       slurm_job_id=slurm_job_id,
-                       recompute_mesh=True,
-                       recompute_c0=True,
-                       write_checkpoints=False,
-                       save_distributed_files_to=distributed_data_folder)
 
 
 def test_convergence_1_step():
@@ -383,7 +336,6 @@ def test_convergence_1_step():
                            out_folder_mode=None,
                            sim_rationale="Testing",
                            slurm_job_id=slurm_job_id,
-                           write_checkpoints=False,
                            save_distributed_files_to=distributed_data_folder)
     # setup the convergence test
     sim.setup_convergence_test()
@@ -550,3 +502,78 @@ def test_convergence_1_step():
             # reset runtime error and error msg
             sim.runtime_error_occurred = False
             sim.error_msg = None
+
+
+def timing_patient1_vascular_sprouting():
+    # preamble
+    sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, distributed_data_folder = preamble()
+
+    # get sim parameters dataframe
+    sim_parameters_df = sim_parameters.as_dataframe()
+
+    # set parameters value leading to sprouting in patient1
+    tdf_i_range = [0.94]  # tdf values for tip cell activation in patient1
+    V_uc_af_range = [2.32]  # V_uc_af values for tip cell activation in patient1
+    V_pT_af_max = float(sim_parameters_df.loc["V_pT_af", "sim_range_max"])
+    sim_parameters.set_value("V_pT_af", V_pT_af_max)
+
+    # get number of step to reach the volume observed in patient1
+    n_steps_range = [5]
+
+    for tdf_i, V_uc_af, n_steps in zip(tdf_i_range, V_uc_af_range, n_steps_range):
+        # set parameters value
+        sim_parameters.set_value("tdf_i", tdf_i)
+        sim_parameters.set_value("V_uc_af", V_uc_af)
+
+        # run simulation
+        sim = RHTimeSimulation(spatial_dimension=spatial_dimension,
+                               sim_parameters=sim_parameters,
+                               patient_parameters=patients_parameters["patient1"],
+                               steps=n_steps,
+                               save_rate=10,
+                               out_folder_name="dolfinx_timing_patient1_vascular-sprouting",
+                               out_folder_mode="datetime",
+                               sim_rationale=f"Testing the condition for the activation of the Tip Cells, I found "
+                                 f"that when V_pT_af equals the maximum range value ({V_pT_af_max:.2e}) and "
+                                 f"V_uc_af = {V_uc_af:.2e} [1 / tau], "
+                                 f"the vascular sprouting starts at tdf_i = {tdf_i:.2g} (i.e., when the tumor is "
+                                 f"very close to the final dimension. In this simulation, I evaluated the vascular "
+                                 f"sprouting for {n_steps} steps, which is the time required to the tumor to "
+                                 f"reach the final volume observed in patients.",
+                               slurm_job_id=slurm_job_id,
+                               save_distributed_files_to=distributed_data_folder)
+        sim.run()
+
+
+def timing_adaptive_vascular_sprouting_for_patient1():
+    # preamble
+    sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, distributed_data_folder = preamble()
+
+    # get sim parameters dataframe
+    sim_parameters_df = sim_parameters.as_dataframe()
+
+    # set parameters value leading to sprouting in patient1
+    tdf_i = 0.94  # tdf values for tip cell activation in patient1
+    sim_parameters.set_value("tdf_i", tdf_i)
+    V_uc_af = 2.32  # V_uc_af values for tip cell activation in patient1
+    sim_parameters.set_value("V_uc_af", V_uc_af)
+    V_pT_af_max = float(sim_parameters_df.loc["V_pT_af", "sim_range_max"])
+    sim_parameters.set_value("V_pT_af", V_pT_af_max)
+
+    # get number of step to reach the volume observed in patient1
+    n_steps = 20
+
+    # set sim rationale
+    sim_rationale = "Testing adaptive solver"
+
+    # set adaptive_simulation
+    simulation = RHMeshAdaptiveSimulation(spatial_dimension=spatial_dimension,
+                                          sim_parameters=sim_parameters,
+                                          patient_parameters=patients_parameters["patient1"],
+                                          steps=n_steps,
+                                          save_rate=1,
+                                          out_folder_name="dolfinx_timing_adaptive_patient1",
+                                          sim_rationale=sim_rationale + " | ADAPTIVE",
+                                          slurm_job_id=slurm_job_id,
+                                          save_distributed_files_to=distributed_data_folder)
+    simulation.run()
