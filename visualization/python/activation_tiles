@@ -85,7 +85,7 @@ def plot_activation_tiles0(tip_cell_activation_csv: str, save_to: Path):
     tv_values = indata[tdf_i_col_name].unique()
     n_tv_values = len(tv_values)
     # get col labels
-    col_labels = [fr"$d_0$ = {tv:.2g} $mm^3$" for tv in tv_values]
+    col_labels = [fr"$V_0$ = {tv:.2g} $mm^3$" for tv in tv_values]
     # 2. T_c
     T_c_values = indata[T_c_col_name].unique()
     n_T_c_values = len(T_c_values)
