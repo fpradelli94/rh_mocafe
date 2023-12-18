@@ -10,9 +10,6 @@ import src.experiments
 comm_world = MPI.COMM_WORLD
 rank = comm_world.rank
 
-# init random seed
-random.seed(22)
-
 # set fenics log level
 # fenics.set_log_level(fenics.LogLevel.ERROR)
 
@@ -29,7 +26,7 @@ logging.root.setLevel(logging.DEBUG)  # setting root logger level
 
 
 def main():
-    src.experiments.timing_adaptive_vascular_sprouting_for_patient1()
+    src.experiments.patient1_time_adaptive_vascular_sprouting()
 
 
 if __name__ == "__main__":
