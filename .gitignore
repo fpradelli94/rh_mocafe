@@ -1,6 +1,7 @@
 __pycache__
 /sif/
 /saved_sim_archive/
+/saved_sim_archive_dolfinx/
 /saved_sim/
 /visualization/paraview/out/*
 /notebooks/out/*
