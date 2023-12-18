@@ -508,6 +508,7 @@ class RHTimeSimulation(RHSimulation):
         self._generate_mesh()  # generate mesh
 
         self._spatial_discretization()  # initialize function space
+        logger.debug(f"DOFS: {self.V.dofmap.index_map.size_global}")
 
         self._generate_initial_conditions()  # generate initial condition
 
@@ -996,24 +997,42 @@ class RHMeshAdaptiveSimulation(RHAdaptiveSimulation):
         return high_res_edges
 
     def _get_high_c_gradient_marker(self):
-        # compute c_old values at midpoints on the previous mesh
-        n_cells_mesh = self.mesh.topology.index_map(self.mesh.topology.dim).size_local
-        cells_midpoints = dolfinx.mesh.compute_midpoints(self.mesh, self.mesh.topology.dim, range(n_cells_mesh))
-        c_values = self.c_old.eval(cells_midpoints, np.arange(n_cells_mesh)).reshape((n_cells_mesh,))
+        """
+        Return a function that marks the edges where the gradient of c is high and, thus, require a refinement.
+        """
+        # compute c_old values at local midpoints in the old mesh
+        n_local_cells_mesh = self.mesh.topology.index_map(self.mesh.topology.dim).size_local
+        local_cells_midpoints_mesh = dolfinx.mesh.compute_midpoints(self.mesh, self.mesh.topology.dim,
+                                                                    range(n_local_cells_mesh))
+        local_c_values_mesh = self.c_old.eval(local_cells_midpoints_mesh,
+                                              np.arange(n_local_cells_mesh)).reshape((n_local_cells_mesh,))
+
+        # broadcast midpoints and c_values over all processes
+        global_cells_midpoints_mesh = comm_world.gather(local_cells_midpoints_mesh, 0)
+        global_c_values_mesh = comm_world.gather(local_c_values_mesh, 0)
+        if rank == 0:
+            global_cells_midpoints_mesh = np.vstack(global_cells_midpoints_mesh)
+            global_c_values_mesh = np.concatenate(global_c_values_mesh)
+        else:
+            global_cells_midpoints_mesh = None
+        global_cells_midpoints_mesh = comm_world.bcast(global_cells_midpoints_mesh, 0)
+        global_c_values_mesh = comm_world.bcast(global_c_values_mesh, 0)
 
         def marker(adapted_mesh: dolfinx.mesh.Mesh):
-            # get cells on adapted mesh
+            # get the number of local cells on the adapted mesh
             n_cells_adapted_mesh = adapted_mesh.topology.index_map(adapted_mesh.topology.dim).size_local
 
-            # get cells colliding with each point
+            # get cells colliding with each global midpoint
             adapted_mesh_bbt = dolfinx.geometry.bb_tree(adapted_mesh, adapted_mesh.topology.dim)
-            cell_candidates = dolfinx.geometry.compute_collisions_points(adapted_mesh_bbt, cells_midpoints)
-            colliding_cells = dolfinx.geometry.compute_colliding_cells(adapted_mesh, cell_candidates, cells_midpoints)
+            cell_candidates = dolfinx.geometry.compute_collisions_points(adapted_mesh_bbt, global_cells_midpoints_mesh)
+            colliding_cells = dolfinx.geometry.compute_colliding_cells(adapted_mesh, cell_candidates,
+                                                                       global_cells_midpoints_mesh)
 
             # create dictionary of the c_values for each colliding cell
             c_values_for_cell = {i: [] for i in range(n_cells_adapted_mesh)}
-            for i, c_val in enumerate(c_values):
-                c_values_for_cell[colliding_cells.links(i)[0]].append(c_val)
+            for i, c_val in enumerate(global_c_values_mesh):
+                if len(colliding_cells.links(i)) > 0:
+                    c_values_for_cell[colliding_cells.links(i)[0]].append(c_val)
 
             # get mean c value for each cell
             mean_c_for_cell = np.array([abs(np.mean(vals_list)) for vals_list in c_values_for_cell.values()])
@@ -1034,73 +1053,110 @@ class RHMeshAdaptiveSimulation(RHAdaptiveSimulation):
 
         return marker
 
-    def _get_future_tip_cell_poitions_edges(self, adapted_mesh, mesh_bbt):
-        if len(self.tip_cell_manager.get_global_tip_cells_list()) == 0:
-            return []
+    def _get_future_tip_cell_poitions_edges(self, adapted_mesh: dolfinx.mesh.Mesh, mesh_bbt):
+        # get global sampling from TipCellManager
+        n_global_samples = self.tip_cell_manager.mesh_sampling.get_n_global_samples()
+        global_sampling = np.array(self.tip_cell_manager.mesh_sampling.global_sampling)
 
+        # find which global samples are on the current processor
+        cell_candidates = dolfinx.geometry.compute_collisions_points(mesh_bbt, global_sampling)
+        colliding_cells = dolfinx.geometry.compute_colliding_cells(self.mesh, cell_candidates,
+                                                                   global_sampling)
+        is_global_sample_on_proc = np.array([len(colliding_cells.links(i)) > 0 for i in range(n_global_samples)])
+
+        # get points on proc
+        n_points_on_proc = is_global_sample_on_proc.sum()
+        points_on_proc = global_sampling[is_global_sample_on_proc, :]
+
+        # find self.mesh cells colliding with global samples
+        current_cells = [colliding_cells.links(i)[0]
+                         for i, is_p_on_proc in enumerate(is_global_sample_on_proc) if is_p_on_proc]
+
+        # compute af value on proc
+        af_values_on_proc = self.af_old.eval(points_on_proc, current_cells)
+        af_values_on_proc = af_values_on_proc.reshape(af_values_on_proc.shape[0])
+
+        # get which global samples have af values above Tc
+        af_above_Tc = (af_values_on_proc >= self.Tc)
+
+        # compute grad af and its norm
+        grad_af_values = self.grad_af_old.eval(points_on_proc, current_cells)
+        norm_grad_af = np.linalg.norm(grad_af_values, axis=1)
+        norm_grad_af = norm_grad_af.reshape(norm_grad_af.shape[0])
+
+        # find where the norm is above Gm
+        grad_af_above_Gm = (norm_grad_af >= self.Gm)
+
+        # compute the negative versor pointing in the opposite direction of the gradient
+        negative_grad_af_versors = np.zeros(shape=(n_points_on_proc, 3))
+        for i in range(self.spatial_dimension):
+            negative_grad_af_versors[:, i] = -(grad_af_values[:, i] / norm_grad_af)
+
+        # check if there is a vessel in that direction
+        point_close_to_capillary = np.zeros((n_points_on_proc,)).astype(bool)  # init
+        current_cp_close_to_capillary = point_close_to_capillary.copy()
+        for i in range(self.refine_rate):
+            # create current checkpoint
+            current_checkpoints = points_on_proc + (self.tc_mean_speed * negative_grad_af_versors)
+
+            # find which points are on the current processor
+            cell_candidates = dolfinx.geometry.compute_collisions_points(mesh_bbt, current_checkpoints)
+            colliding_cells = dolfinx.geometry.compute_colliding_cells(self.mesh, cell_candidates,
+                                                                       current_checkpoints)
+            is_cell_on_proc = [len(colliding_cells.links(i)) > 0 for i in range(n_points_on_proc)]
+            current_cells = [colliding_cells.links(i)[0]
+                             for i, is_p_on_proc in enumerate(is_cell_on_proc) if is_p_on_proc]
+
+            # cast is_cell_on_proc to np.ndarray
+            is_cell_on_proc = np.array(is_cell_on_proc, dtype=object).astype(bool)
+
+            # find c_value at cells on proc
+            c_value_at_cp_on_proc = self.c_old.eval(current_checkpoints[is_cell_on_proc, :], current_cells)
+
+            # set test variable to False is the point is not on proc
+            current_cp_close_to_capillary[~is_cell_on_proc] = False
+
+            # for the other, set to true is c_value is over 0
+            c_value_at_cp_on_proc = c_value_at_cp_on_proc.reshape((len(current_cells),))
+            current_cp_close_to_capillary[is_cell_on_proc] = c_value_at_cp_on_proc > 0.
+
+            # combine with the one computed at the previous step
+            point_close_to_capillary = current_cp_close_to_capillary | point_close_to_capillary
+
+        # get boolean index of the points on proc respecting all conditions
+        boolean_index_selected_points_on_proc = af_above_Tc & grad_af_above_Gm & point_close_to_capillary
+
+        # get boolean index of the global samples respecting all conditions
+        local_boolean_index_selected_global_samples = np.zeros((n_global_samples,)).astype(bool)
+        local_boolean_index_selected_global_samples[is_global_sample_on_proc] = boolean_index_selected_points_on_proc
+        print(local_boolean_index_selected_global_samples.sum())
+
+        # On Proc 0, get the global boolean index using a logical or
+        list_boolean_indices = comm_world.gather(local_boolean_index_selected_global_samples, 0)
+        if rank == 0:
+            global_boolean_index_selected_global_samples = np.logical_or.reduce(list_boolean_indices)
         else:
-            # get tot number of edges
-            n_edges = adapted_mesh.topology.index_map(1).size_local
-            # get edges midpoints
-            edges_midpoints = dolfinx.mesh.compute_midpoints(adapted_mesh, 1, range(n_edges))
+            global_boolean_index_selected_global_samples = None
+        global_boolean_index_selected_global_samples = comm_world.bcast(global_boolean_index_selected_global_samples, 0)
 
-            # get points on proc and relative cells
-            points_on_proc, cells = fu.get_colliding_cells_for_points(edges_midpoints, self.mesh, mesh_bbt)
+        # get selected global points
+        selected_global_samples = global_sampling[global_boolean_index_selected_global_samples, :]
 
-            # get af values above Tc at edges_midpoints
-            af_above_Tc = self.af_old.eval(points_on_proc, cells) >= self.Tc
-            af_above_Tc = af_above_Tc.reshape(af_above_Tc.shape[0])
+        # get cells colliding with the selected global samples
+        _, colliding_cells = fu.get_colliding_cells_for_points(selected_global_samples,
+                                                               adapted_mesh,
+                                                               dolfinx.geometry.bb_tree(adapted_mesh,
+                                                                                        adapted_mesh.topology.dim))
 
-            # compute grad af and its norm
-            grad_af_values = self.grad_af_old.eval(points_on_proc, cells)
-            norm_grad_af = np.linalg.norm(grad_af_values, axis=1)
+        # get edges connected to colliding cells
+        adapted_mesh.topology.create_connectivity(adapted_mesh.topology.dim, 1)
+        selected_edges = dolfinx.mesh.compute_incident_entities(adapted_mesh.topology,
+                                                                colliding_cells,
+                                                                adapted_mesh.topology.dim,
+                                                                1)
 
-            # find where the norm is above Gm
-            grad_af_above_Gm = norm_grad_af >= self.Gm
-            grad_af_above_Gm = grad_af_above_Gm.reshape(grad_af_above_Gm.shape[0])
-
-            # compute the negative versor pointing in the opposite direction of the gradient
-            negative_grad_af_versors = np.zeros(shape=(len(norm_grad_af), 3))
-            for i in range(self.spatial_dimension):
-                negative_grad_af_versors[:, i] = -(grad_af_values[:, i] / norm_grad_af)
-
-            # check if there is a vessel in that direction
-            point_close_to_capillary = np.zeros((n_edges,)).astype(bool)  # init
-            current_cp_close_to_capillary = point_close_to_capillary.copy()
-            for i in range(self.refine_rate):
-                # create current checkpoint
-                current_checkpoints = edges_midpoints + (self.tc_mean_speed * negative_grad_af_versors)
-
-                # find which points are on the current processor
-                cell_candidates = dolfinx.geometry.compute_collisions_points(mesh_bbt, current_checkpoints)
-                colliding_cells = dolfinx.geometry.compute_colliding_cells(self.mesh, cell_candidates,
-                                                                           current_checkpoints)
-                is_cell_on_proc = [len(colliding_cells.links(i)) > 0 for i in range(n_edges)]
-                current_cells = [colliding_cells.links(i)[0]
-                                 for i, is_p_on_proc in zip(range(n_edges), is_cell_on_proc)
-                                 if is_p_on_proc]
-
-                # cast is_cell_on_proc to np.ndarray
-                is_cell_on_proc = np.array(is_cell_on_proc, dtype=object).astype(bool)
-
-                # find c_value at cells on proc
-                c_value_at_cp_on_proc = self.c_old.eval(current_checkpoints[is_cell_on_proc, :], current_cells)
-
-                # set test variable to False is the point is not on proc
-                current_cp_close_to_capillary[~is_cell_on_proc] = False
-
-                # for the other, set to true is c_value is over 0
-                c_value_at_cp_on_proc = c_value_at_cp_on_proc.reshape((len(current_cells),))
-                current_cp_close_to_capillary[is_cell_on_proc] = c_value_at_cp_on_proc > 0.
-
-                # combine with the one computed at the previous step
-                point_close_to_capillary = current_cp_close_to_capillary | point_close_to_capillary
-
-            possible_future_tip_cell_points = af_above_Tc & grad_af_above_Gm & point_close_to_capillary
-            possible_future_tip_cell_edges = np.arange(n_edges)[possible_future_tip_cell_points]
-
-            # return corresponding edges
-            return possible_future_tip_cell_edges
+        # return corresponding edges
+        return selected_edges
 
     def _adapt_mesh(self):
         """
@@ -1215,17 +1271,20 @@ class RHMeshAdaptiveSimulation(RHAdaptiveSimulation):
         while self.t < (self.steps + 1):
             # update time
             self.t += self.dt_constant.value
+            logger.info(f"Starting iteration at time {self.t}")
+            logger.debug(f"Current DOFS: {self.V.dofmap.index_map.size_global}")
 
-            # # manage tip cells
-            # self.tip_cell_manager.activate_tip_cell(self.c_old, self.af_old, self.grad_af_old, self.t)
-            # self.tip_cell_manager.revert_tip_cells(self.af_old, self.grad_af_old)
-            # self.tip_cell_manager.move_tip_cells(self.c_old, self.af_old, self.grad_af_old)
 
-            # # store tip cells in fenics function and json file
-            # logger.debug(f"Saving incremental tip cells")
-            # self.t_c_f_function = self.tip_cell_manager.get_latest_tip_cell_function()
-            # self.t_c_f_function.x.scatter_forward()
-            # self.tip_cell_manager.save_incremental_tip_cells(f"{self.report_folder}/incremental_tipcells.json", self.t)
+            # manage tip cells
+            self.tip_cell_manager.activate_tip_cell(self.c_old, self.af_old, self.grad_af_old, self.t)
+            self.tip_cell_manager.revert_tip_cells(self.af_old, self.grad_af_old)
+            self.tip_cell_manager.move_tip_cells(self.c_old, self.af_old, self.grad_af_old)
+
+            # store tip cells in fenics function and json file
+            logger.debug(f"Saving incremental tip cells")
+            self.t_c_f_function = self.tip_cell_manager.get_latest_tip_cell_function()
+            self.t_c_f_function.x.scatter_forward()
+            self.tip_cell_manager.save_incremental_tip_cells(f"{self.report_folder}/incremental_tipcells.json", self.t)
 
             # if it is time to refine
             if (self.refine_counter % self.refine_rate) == 0:
