@@ -264,7 +264,8 @@ class RHSimulation:
                                 ".thumbs",
                                 ".sim_cache",
                                 "jobids.txt",
-                                "slurm"]
+                                "slurm",
+                                "misc"]
 
             # if reproduce folder exists, remove it
             if self.reproduce_folder.exists():
@@ -290,6 +291,7 @@ class RHSimulation:
             self.vec_V = dolfinx.fem.FunctionSpace(mesh, ufl.VectorElement("P", self.mesh.ufl_cell(), 1))
 
         self.subV0_collapsed, self.collapsedV0_to_V = self.V.sub(0).collapse()
+        logger.debug(f"DOFS: {self.V.dofmap.index_map.size_global}")
 
     def _generate_u_old(self):
         logger.info(f"Initializing u old... ")
@@ -337,7 +339,7 @@ class RHSimulation:
         project(ufl.grad(self.af_old), target_func=self.grad_af_old)
 
         # define tip cell manager
-        self.tip_cell_manager = TipCellManager(self.mesh, self.sim_parameters, n_checkpoints=8)
+        self.tip_cell_manager = TipCellManager(self.mesh, self.sim_parameters)
 
     def __compute_af0(self, sim_parameters: Parameters, options: Dict = None):
         """
@@ -431,7 +433,7 @@ class RHTimeSimulation(RHSimulation):
                  sim_rationale: str = "No comment",
                  slurm_job_id: int = None,
                  save_distributed_files_to: str or None = None,
-                 stop_with_zero_tc = True):
+                 stop_with_zero_tc=True):
         """
         Initialize a Simulation Object.
 
@@ -508,7 +510,6 @@ class RHTimeSimulation(RHSimulation):
         self._generate_mesh()  # generate mesh
 
         self._spatial_discretization()  # initialize function space
-        logger.debug(f"DOFS: {self.V.dofmap.index_map.size_global}")
 
         self._generate_initial_conditions()  # generate initial condition
 
@@ -533,11 +534,13 @@ class RHTimeSimulation(RHSimulation):
 
         self._generate_initial_conditions()  # generate initial condition
 
+        self._set_up_problem()
+
     def test_convergence(self, lsp: Dict = None):
         if lsp is not None:
             self.lsp = lsp
 
-        self._time_iteration(test_convergence=True)
+        self._one_step_solve()
 
     def _check_simulation_properties(self):
         # check base conditions
@@ -579,6 +582,67 @@ class RHTimeSimulation(RHSimulation):
                 f_file.write_function(collapsed_function, t)
             else:
                 f_file.write_function(fun, t)
+
+    def _set_up_problem(self):
+        # define weak form
+        logger.info(f"{self.out_folder_name}:Defining weak form...")
+        self.u = dolfinx.fem.Function(self.V)
+        self.u.x.array[:] = self.u_old.x.array
+        self.u.x.scatter_forward()
+
+        # assign u_old to u
+        af, c, mu = ufl.split(self.u)
+        # define test functions
+        v1, v2, v3 = ufl.TestFunctions(self.V)
+        # build total form
+        af_form = src.forms.angiogenic_factors_form_dt(af, self.af_old, self.phi, c, v1, self.sim_parameters)
+        capillaries_form = src.forms.angiogenesis_form_no_proliferation(
+            c, self.c_old, mu, self.mu_old, v2, v3, self.sim_parameters)
+        form = af_form + capillaries_form
+
+        # define problem
+        logger.info(f"{self.out_folder_name}:Defining problem...")
+        self.problem = dolfinx.fem.petsc.NonlinearProblem(form, self.u)
+
+        # activate tip cells
+        self.tip_cell_manager.activate_tip_cell(self.c_old, self.af_old, self.grad_af_old, 0)
+
+        # revert tip cells
+        self.tip_cell_manager.revert_tip_cells(self.af_old, self.grad_af_old)
+
+        # move tip cells
+        self.tip_cell_manager.move_tip_cells(self.c_old, self.af_old, self.grad_af_old)
+
+        # measure n_tcs
+        n_tcs = len(self.tip_cell_manager.get_global_tip_cells_list())
+        logger.info(f"Step {0} | n tc = {n_tcs}")
+
+    def _one_step_solve(self):
+        # define solver
+        self.solver = NewtonSolver(comm_world, self.problem)
+        # Set Newton solver options
+        self.solver.atol = 1e-6
+        self.solver.rtol = 1e-6
+        self.solver.convergence_criterion = "incremental"
+        self.solver.max_it = 100
+        self.solver.report = True  # report iterations
+
+        # set options for krylov solver
+        opts = PETSc.Options()
+        option_prefix = self.solver.krylov_solver.getOptionsPrefix()
+        for o, v in self.lsp.items():
+            opts[f"{option_prefix}{o}"] = v
+        self.solver.krylov_solver.setFromOptions()
+
+        # solve
+        logger.debug(f"Solving problem...")
+        try:
+            self.solver.solve(self.u)
+        except RuntimeError as e:
+            # store error info
+            self.runtime_error_occurred = True
+            self.error_msg = str(e)
+            logger.error(str(e))
 
     def _time_iteration(self, test_convergence: bool = False):
         # define weak form
@@ -918,7 +982,7 @@ class RHMeshAdaptiveSimulation(RHAdaptiveSimulation):
                  out_folder_mode: str = None,
                  sim_rationale: str = "No comment",
                  slurm_job_id: int = None,
-                 save_distributed_files_to = None,
+                 save_distributed_files_to=None,
                  refine_rate: int = 5):
         super().__init__(spatial_dimension,
                          sim_parameters,
@@ -931,7 +995,7 @@ class RHMeshAdaptiveSimulation(RHAdaptiveSimulation):
                          slurm_job_id,
                          save_distributed_files_to)
         # Define refinement-specific constants
-        self.refine_rate = 5  # set how frequently the mesh should be updated
+        self.refine_rate = refine_rate  # set how frequently the mesh should be updated
         self.refine_counter = 0  # set a counter to keep track of the number of refinements
         self.stop_adapting = False  # set a flag to stop refining
         self.af_residual_tolerance = 1e-5  # set tolerance for af residual
@@ -1274,7 +1338,6 @@ class RHMeshAdaptiveSimulation(RHAdaptiveSimulation):
             logger.info(f"Starting iteration at time {self.t}")
             logger.debug(f"Current DOFS: {self.V.dofmap.index_map.size_global}")
 
-
             # manage tip cells
             self.tip_cell_manager.activate_tip_cell(self.c_old, self.af_old, self.grad_af_old, self.t)
             self.tip_cell_manager.revert_tip_cells(self.af_old, self.grad_af_old)
@@ -1410,17 +1473,18 @@ class RHTestTipCellActivation(RHSimulation):
             # set parameters value
             current_sim_parameters = Parameters(self.df_standard_params)
             for param_name, param_value in zip(self.params_dictionary.keys(), param_values):
+                logger.debug(f"Setting  {param_name} to {param_value}")
                 current_sim_parameters.set_value(param_name, param_value)
 
             # generate sim parameters dependent initial conditions
             self._generate_sim_parameters_dependent_initial_conditions(sim_parameters=current_sim_parameters)
 
             # call activate tip cell
-            tipcell_activated = self.tip_cell_manager.test_tip_cell_activation(self.c_old, self.af_old, self.grad_af_old)
+            tc_activated = self.tip_cell_manager.test_tip_cell_activation(self.c_old, self.af_old, self.grad_af_old)
 
             # store result in dataframe
             tip_cell_activation_df = tip_cell_activation_df.append(
-                {col: val for col, val in zip(columns_name, [tipcell_activated, *param_values])},
+                {col: val for col, val in zip(columns_name, [tc_activated, *param_values])},
                 ignore_index=True
             )
 
