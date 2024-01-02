@@ -888,6 +888,10 @@ class RHAdaptiveSimulation(RHTimeSimulation):
 
         # define solver
         self.solver = NewtonSolver(comm_world, problem)
+        self.solver.atol = 1e-6
+        self.solver.rtol = 1e-6
+        self.solver.convergence_criterion = "incremental"
+        self.solver.max_it = 100
         self.solver.report = True  # report iterations
         # set options for krylov solver
         opts = PETSc.Options()

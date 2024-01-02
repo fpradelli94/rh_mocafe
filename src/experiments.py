@@ -3,8 +3,10 @@ import logging
 import time
 import argparse
 from pathlib import Path
+from itertools import product
 import pandas as pd
 import numpy as np
+from tqdm import tqdm
 from mocafe.fenut.parameters import Parameters
 from mpi4py import MPI
 from src.simulation import (RHTimeSimulation, RHTestTipCellActivation, RHAdaptiveSimulation, RHMeshAdaptiveSimulation)
@@ -112,22 +114,25 @@ def check_tip_cell_activation_for_each_patient():
     # 1. We test a tdf_i range from 0.2 to 1 (i.e. initial tumor volume ranges from 20% to 100% of the size reported by
     #    clinicians).
     tdf_i_range = np.linspace(start=0.2, stop=1.0, num=5, endpoint=True)
+    tdf_i_range = [tdf_i_range[3]]
     # 2. We test different value of af tumor secretion (V_pT_af). As the experimental range spans over different orders
     #    of magnitudes, we test 5 points over the log scale between the minimum and the maximal V_pT_af.
     V_pT_af_min = float(sim_parameters_df.loc["V_pT_af", "sim_range_min"])
     V_pT_af_max = float(sim_parameters_df.loc["V_pT_af", "sim_range_max"])
     V_pT_af_range = np.logspace(np.log10(V_pT_af_min), np.log10(V_pT_af_max), num=5, endpoint=True)
+    V_pT_af_range = [V_pT_af_max]
     # 3. We test different value of capillary uptake (V_uc_af). The values range from twice the natural VEGF degradation
     #    rate to 10 times the value provided by Travasso et al. (2011)
     V_uc_af_min = float(sim_parameters_df.loc["V_d_af", "sim_range_min"])
     V_uc_af_max = 10 * float(sim_parameters_df.loc["V_uc_af", "sim_value"])
     V_uc_af_range = np.logspace(np.log10(V_uc_af_min), np.log10(V_uc_af_max), num=5, endpoint=True)
+    V_uc_af_range = [V_uc_af_max]
     # 4. We test different value of the minimal concentration required for tip cell activation (T_c). We test 4
     #    log points from 0 to 10 times the estimated value
     T_c_estimated = float(sim_parameters.get_value("T_c"))
     T_c_range = np.array([0., (T_c_estimated / 10), T_c_estimated, (10 * T_c_estimated)])
 
-    for patient_number in [0, 1, 2]:
+    for patient_number in [0]:
         logger.info(f"Starting tip cell activation test for patient{patient_number}")
 
         current_patient_parameter = patients_parameters[f"patient{patient_number}"]  # load patient params
@@ -143,30 +148,30 @@ def check_tip_cell_activation_for_each_patient():
                 T_c=T_c_range)
 
 
-def tip_cell_activation_patient1():
-    # preamble
-    sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, _ = preamble()
-
-    # get sim parameters dataframe
-    sim_parameters_df = sim_parameters.as_dataframe()
-
-    # Conditions to test
-    tdf_i_range = np.linspace(start=0.8, stop=1.0, num=21, endpoint=True)
-    V_pT_af_max = float(sim_parameters_df.loc["V_pT_af", "sim_range_max"])
-    V_pT_af_range = [V_pT_af_max]
-    V_uc_af_range = [float(sim_parameters_df.loc["V_d_af", "sim_range_min"]),
-                     2.32]  # got from older tip cell activation
-
-    # Test tip cell activation
-    sim = RHTestTipCellActivation(spatial_dimension=spatial_dimension,
-                                  standard_params=sim_parameters,
-                                  patient_parameters=patients_parameters["patient1"],
-                                  out_folder_name=f"dolfinx_patient1_tip-cell-activation",
-                                  out_folder_mode="datetime",
-                                  slurm_job_id=slurm_job_id)
-    sim.run(tdf_i=tdf_i_range,
-            V_pT_af=V_pT_af_range,
-            V_uc_af=V_uc_af_range)
+# def tip_cell_activation_patient1():
+#     # preamble
+#     sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, _ = preamble()
+#
+#     # get sim parameters dataframe
+#     sim_parameters_df = sim_parameters.as_dataframe()
+#
+#     # Conditions to test
+#     tdf_i_range = np.linspace(start=0.8, stop=1.0, num=21, endpoint=True)
+#     V_pT_af_max = float(sim_parameters_df.loc["V_pT_af", "sim_range_max"])
+#     V_pT_af_range = [V_pT_af_max]
+#     V_uc_af_range = [float(sim_parameters_df.loc["V_d_af", "sim_range_min"]),
+#                      2.32]  # got from older tip cell activation
+#
+#     # Test tip cell activation
+#     sim = RHTestTipCellActivation(spatial_dimension=spatial_dimension,
+#                                   standard_params=sim_parameters,
+#                                   patient_parameters=patients_parameters["patient1"],
+#                                   out_folder_name=f"dolfinx_patient1_tip-cell-activation",
+#                                   out_folder_mode="datetime",
+#                                   slurm_job_id=slurm_job_id)
+#     sim.run(tdf_i=tdf_i_range,
+#             V_pT_af=V_pT_af_range,
+#             V_uc_af=V_uc_af_range)
 
 
 def vascular_sprouting_one_step(patient: str):
@@ -296,16 +301,18 @@ def tip_cell_activation_V_pT_and_V_uc_ranges_for_each_patient():
 
     # get sim parameters dataframe
     sim_parameters_df = sim_parameters.as_dataframe()
+
     # get min tdf_i for each patient
     min_tdf_i = {
-        "patient0": 0.05,
-        "patient1": 0.94,
+        "patient0": 0.04,
+        "patient1": 0.6,
         "patient2": 0.05
     }
 
     # set V_uc_af range
-    V_uc_af_range = np.linspace(start=float(sim_parameters.get_value("V_d_af")),
-                                stop=15.0,
+    V_uc_af_min = float(sim_parameters_df.loc["V_d_af", "sim_range_min"])
+    V_uc_af_range = np.linspace(start=V_uc_af_min,
+                                stop=2.32,
                                 num=21, endpoint=True)
     # set V_pT_af_range
     V_pT_af_max = float(sim_parameters_df.loc["V_pT_af", "sim_range_max"])
@@ -313,7 +320,7 @@ def tip_cell_activation_V_pT_and_V_uc_ranges_for_each_patient():
                                 stop=V_pT_af_max,
                                 num=11, endpoint=True)
 
-    for patient in ["patient0", "patient1", "patient2"]:
+    for patient in ["patient1"]:
         sim_rationale = \
             (f"From Tip Cell Activation experiments, I determined the minimum volume required to induce vascular "
              f"sprouting for each patient. For this patient, the minimum volume corrspond to tdf_i = "
@@ -324,8 +331,7 @@ def tip_cell_activation_V_pT_and_V_uc_ranges_for_each_patient():
         sim = RHTestTipCellActivation(spatial_dimension=spatial_dimension,
                                       standard_params=sim_parameters,
                                       patient_parameters=patients_parameters[patient],
-                                      out_folder_name=f"dolfinx_{patient}_tip-cell-activation",
-                                      out_folder_mode="datetime",
+                                      out_folder_name=f"dolfinx_{patient}_tip-cell-activation_Vranges",
                                       sim_rationale=sim_rationale,
                                       slurm_job_id=slurm_job_id)
         sim.run(tdf_i=[min_tdf_i[patient]],
@@ -333,292 +339,207 @@ def tip_cell_activation_V_pT_and_V_uc_ranges_for_each_patient():
                 V_uc_af=V_uc_af_range)
 
 
-def test_adaptive_vascular_sprouting_for_patient1():
+def patient0_time_adaptive_vascular_sprouting():
     # preamble
     sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, distributed_data_folder = preamble()
 
     # get sim parameters dataframe
     sim_parameters_df = sim_parameters.as_dataframe()
 
-    # set parameters value leading to sprouting in patient1
-    tdf_i = 0.05  # tdf values for tip cell activation in patient1
+    # set patient
+    patient = "patient0"
+
+    # set parameters value leading to sprouting in patient0
+    tdf_i = 0.05
     sim_parameters.set_value("tdf_i", tdf_i)
-    V_uc_af = 2.32  # V_uc_af values for tip cell activation in patient1
-    sim_parameters.set_value("V_uc_af", V_uc_af)
     V_pT_af_max = float(sim_parameters_df.loc["V_pT_af", "sim_range_max"])
     sim_parameters.set_value("V_pT_af", V_pT_af_max)
+    # get V_uc_af
+    V_uc_af_min = float(sim_parameters_df.loc["V_d_af", "sim_range_min"])
+    V_uc_af_max = 10 * float(sim_parameters_df.loc["V_uc_af", "sim_value"])
+    V_uc_af_range = np.logspace(np.log10(V_uc_af_min), np.log10(V_uc_af_max), num=5, endpoint=True)
+    V_uc_af = V_uc_af_range[1]
+    sim_parameters.set_value("V_uc_af", V_uc_af)
 
     # get number of step to reach the volume observed in patient1
     n_steps = int(np.round((np.log(1 / tdf_i) / np.log(float(sim_parameters.get_value("tgr"))))))
 
-    # set sim rationale
-    sim_rationale = "Testing adaptive solver"
+    # run simulation
+    sim = RHAdaptiveSimulation(spatial_dimension=spatial_dimension,
+                               sim_parameters=sim_parameters,
+                               patient_parameters=patients_parameters[patient],
+                               steps=n_steps,
+                               save_rate=50,
+                               out_folder_name=f"dolfinx_{patient}_vascular-sprouting-adaptive_tdf_i={tdf_i:.2g}",
+                               sim_rationale=f"Testing the condition for the activation of the Tip Cells, I found "
+                                             f"that when V_pT_af equals the maximum range value ({V_pT_af_max:.2e}) and "
+                                             f"V_uc_af = {V_uc_af:.2e} [1 / tau], "
+                                             f"the vascular sprouting starts at tdf_i = {tdf_i:.2g}",
+                               slurm_job_id=slurm_job_id,
+                               save_distributed_files_to=distributed_data_folder)
+    sim.run()
 
-    # set adaptive_simulation
-    simulation = RHAdaptiveSimulation(spatial_dimension=spatial_dimension,
-                                      sim_parameters=sim_parameters,
-                                      patient_parameters=patients_parameters["patient0"],
-                                      steps=n_steps,
-                                      save_rate=10000,
-                                      out_folder_name="dolfinx_patient0_test-vascular-sprouting-adaptive",
-                                      sim_rationale=sim_rationale + " | ADAPTIVE",
-                                      slurm_job_id=slurm_job_id,
-                                      save_distributed_files_to=distributed_data_folder)
-    simulation.run()
 
-
-def test_convergence_1_step():
+def test_convergence_1_step(patient: str):
     sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, distributed_data_folder = preamble()
 
-    patient1_parameters = patients_parameters["patient1"]
+    patient_parameters = patients_parameters[patient]
 
     sim = RHTimeSimulation(spatial_dimension=spatial_dimension,
                            sim_parameters=sim_parameters,
-                           patient_parameters=patient1_parameters,
+                           patient_parameters=patient_parameters,
                            steps=1,
-                           save_rate=1,
-                           out_folder_name="dolfinx_test_convergence_for_preconditioners_gmres",
+                           save_rate=10,
+                           out_folder_name=f"dolfinx_{patient}_test_convergence_for_preconditioners_gmres",
                            out_folder_mode=None,
                            sim_rationale="Testing",
                            slurm_job_id=slurm_job_id,
                            save_distributed_files_to=distributed_data_folder)
+
     # setup the convergence test
     sim.setup_convergence_test()
+
     # setup list for storing performance
     performance_dicts = []
+
+    # setup list of linear solver parameters to test
+    lsp_list = []
+
     # --------------------------------------------------------------------------------------------------------------- #
-    # Iterative solvers                                                                                               #
+    # Add Iterative solvers to lsp list                                                                               #
     # --------------------------------------------------------------------------------------------------------------- #
     # create list of solver and preconditioners
-    solver_list = ["cg", "gmres"]
+    iterative_solver_list = ["cg", "gmres"]
     pc_type_list = ["jacobi", "bjacobi", "sor", "asm", "gasm", "gamg"]
-    for solver in solver_list:
-        for pc in pc_type_list:
-            for use_mumps in [True, False]:
-                # log
-                if use_mumps:
-                    logger.info(f"Testing solver {solver} with pc {pc} with mumps")
 
-                else:
-                    logger.info(f"Testing solver {solver} with pc {pc} NO mumps")
+    # add all combinations to lsp list
+    lsp_list.extend([{"ksp_type": solver, "pc_type": pc, "ksp_monitor": None}
+                     for solver, pc in product(iterative_solver_list, pc_type_list)])
 
-                # set linear solver parameters
-                if use_mumps:
-                    lsp = {
-                        "ksp_type": solver,
-                        "pc_type": pc,
-                        "ksp_monitor": None,
-                        "pc_factor_mat_solver_type": "mumps"
-                    }
-                else:
-                    lsp = {
-                        "ksp_type": solver,
-                        "pc_type": pc,
-                        "ksp_monitor": None
-                    }
-                sim.lsp = lsp
+    # add all combination using mumps as backend
+    lsp_list.extend([{"ksp_type": solver, "pc_type": pc, "ksp_monitor": None, "pc_factor_mat_solver_type": "mumps"}
+                     for solver, pc in product(iterative_solver_list, pc_type_list)])
 
-                # time solution
-                time0 = time.perf_counter()
-                sim.test_convergence()
-                tot_time = time.perf_counter() - time0
-
-                # check if error occurred
-                error = sim.runtime_error_occurred
-                error_msg = sim.error_msg
-
-                # build performance dict
-                perf_dict = {
-                    "solver": "gmres",
-                    "pc": pc,
-                    "mumps": use_mumps,
-                    "time": tot_time,
-                    "error": error,
-                    "error_msg": error_msg
-                }
-                # append dict to list
-                performance_dicts.append(perf_dict)
-                df = pd.DataFrame(performance_dicts)
-                if MPI.COMM_WORLD.rank == 0:
-                    df.to_csv(sim.data_folder / Path("performance.csv"))
-
-                # reset runtime error and error msg
-                sim.runtime_error_occurred = False
-                sim.error_msg = None
-
-    # create a list of solver and preconditioners using hypre
-    solver_list = ["cg", "gmres"]
-    pc_type_list = ["hypre"]
+    # add hypre preconditioners
     hypre_type_list = ["euclid", "pilut", "parasails", "boomeramg"]
-    for solver in solver_list:
-        for pc in pc_type_list:
-            for hypre_type in hypre_type_list:
-                # log and create configuration
-                logger.info(f"Testing solver {solver} with hypre (type {hypre_type})")
-                lsp = {
-                    "ksp_type": solver,
-                    "pc_type": pc,
-                    "ksp_monitor": None,
-                    "pc_hypre_type": hypre_type
-                }
-                sim.lsp = lsp
-
-                # time solution
-                time0 = time.perf_counter()
-                sim.test_convergence()
-                tot_time = time.perf_counter() - time0
-
-                # check if error occurred
-                error = sim.runtime_error_occurred
-                error_msg = sim.error_msg
-
-                # build performance dict
-                perf_dict = {
-                    "solver": "gmres",
-                    "pc": f"{pc} (type {hypre_type})",
-                    "mumps": False,
-                    "time": tot_time,
-                    "error": error,
-                    "error_msg": error_msg
-                }
-                # append dict to list
-                performance_dicts.append(perf_dict)
-                df = pd.DataFrame(performance_dicts)
-                if MPI.COMM_WORLD.rank == 0:
-                    df.to_csv(sim.data_folder / Path("performance.csv"))
-
-                # reset runtime error and error msg
-                sim.runtime_error_occurred = False
-                sim.error_msg = None
+    lsp_list.extend([{"ksp_type": solver, "pc_type": "hypre", "pc_hypre_type": hypre_type, "ksp_monitor": None}
+                     for solver, hypre_type in product(iterative_solver_list, hypre_type_list)])
 
     # --------------------------------------------------------------------------------------------------------------- #
-    # Direct solvers                                                                                                  #
+    # Add Direct solvers to lsp list                                                                                  #
     # --------------------------------------------------------------------------------------------------------------- #
     direct_solver_list = ["lu", "cholesky"]
-    for ds in direct_solver_list:
-        for use_mumps in [True, False]:
-            # log
-            if use_mumps:
-                logger.info(f"Testing direct solver {ds} with mumps")
+    lsp_list.extend([{"ksp_type": "preonly", "pc_type": ds, "ksp_monitor": None}
+                    for ds in direct_solver_list])
+    # add also with mumps
+    lsp_list.extend([{"ksp_type": "preonly", "pc_type": ds, "ksp_monitor": None, "pc_factor_mat_solver_type": "mumps"}
+                    for ds in direct_solver_list])
 
-            else:
-                logger.info(f"Testing direct solver {ds} with mumps NO mumps")
+    # --------------------------------------------------------------------------------------------------------------- #
+    # Iterate
+    # --------------------------------------------------------------------------------------------------------------- #
+    if MPI.COMM_WORLD.rank == 0:
+        pbar_file = open("convergence_pbar.o", "w")
+    else:
+        pbar_file = None
+    pbar = tqdm(total=len(lsp_list), ncols=100, desc="convergence_test", file=pbar_file,
+                disable=True if MPI.COMM_WORLD.rank != 0 else False)
 
-            # set linear solver parameters
-            if use_mumps:
-                lsp = {
-                    "ksp_type": "preonly",
-                    "pc_type": ds,
-                    "ksp_monitor": None,
-                    "pc_factor_mat_solver_type": "mumps"
-                }
-            else:
-                lsp = {
-                    "ksp_type": "preonly",
-                    "pc_type": ds,
-                    "ksp_monitor": None,
-                }
-            sim.lsp = lsp
+    for lsp in lsp_list:
+        # get characteristics of lsp
+        current_solver = lsp['ksp_type']
+        if lsp['pc_type'] == "hypre":
+            current_pc = f"{lsp['pc_type']} ({lsp['pc_hypre_type']})"
+        else:
+            current_pc = lsp['pc_type']
+        using_mumps = ("mumps" in lsp.values())
 
-            # time solution
-            time0 = time.perf_counter()
-            sim.test_convergence()
-            tot_time = time.perf_counter() - time0
+        # logging
+        msg = f"Testing solver {current_solver} with pc {current_pc}"
+        if using_mumps:
+            msg += f" (MUMPS)"
+        logger.info(msg)
 
-            # check if error occurred
-            error = sim.runtime_error_occurred
-            error_msg = sim.error_msg
+        # set linear solver parameters
+        sim.lsp = lsp
 
-            # build performance dict
-            perf_dict = {
-                "solver": "preonly",
-                "pc": ds,
-                "mumps": use_mumps,
-                "time": tot_time,
-                "error": error,
-                "error_msg": error_msg
-            }
-            # append dict to list
-            performance_dicts.append(perf_dict)
-            df = pd.DataFrame(performance_dicts)
-            if MPI.COMM_WORLD.rank == 0:
-                df.to_csv(sim.data_folder / Path("performance.csv"))
+        # time solution
+        time0 = time.perf_counter()
+        sim.test_convergence()
+        tot_time = time.perf_counter() - time0
 
-            # reset runtime error and error msg
-            sim.runtime_error_occurred = False
-            sim.error_msg = None
+        # check if error occurred
+        error = sim.runtime_error_occurred
+        error_msg = sim.error_msg
+
+        # build performance dict
+        perf_dict = {
+            "solver": current_solver,
+            "pc": current_pc,
+            "mumps": using_mumps,
+            "time": tot_time,
+            "error": error,
+            "error_msg": error_msg
+        }
+
+        # append dict to list
+        performance_dicts.append(perf_dict)
+        df = pd.DataFrame(performance_dicts)
+        if MPI.COMM_WORLD.rank == 0:
+            df.to_csv(sim.data_folder / Path("performance.csv"))
+
+        # reset runtime error and error msg
+        sim.runtime_error_occurred = False
+        sim.error_msg = None
+
+        # update pbar
+        pbar.update(1)
+
+    pbar_file.close()
 
 
-def timing_patient1_vascular_sprouting():
+def timing_mesh_refinement_patient0():
     # preamble
     sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, distributed_data_folder = preamble()
 
-    # get sim parameters dataframe
-    sim_parameters_df = sim_parameters.as_dataframe()
-
-    # set parameters value leading to sprouting in patient1
-    tdf_i_range = [0.94]  # tdf values for tip cell activation in patient1
-    V_uc_af_range = [2.32]  # V_uc_af values for tip cell activation in patient1
-    V_pT_af_max = float(sim_parameters_df.loc["V_pT_af", "sim_range_max"])
-    sim_parameters.set_value("V_pT_af", V_pT_af_max)
-
-    # get number of step to reach the volume observed in patient1
-    n_steps_range = [5]
-
-    for tdf_i, V_uc_af, n_steps in zip(tdf_i_range, V_uc_af_range, n_steps_range):
-        # set parameters value
-        sim_parameters.set_value("tdf_i", tdf_i)
-        sim_parameters.set_value("V_uc_af", V_uc_af)
-
-        # run simulation
-        sim = RHTimeSimulation(spatial_dimension=spatial_dimension,
-                               sim_parameters=sim_parameters,
-                               patient_parameters=patients_parameters["patient1"],
-                               steps=n_steps,
-                               save_rate=10,
-                               out_folder_name="dolfinx_timing_patient1_vascular-sprouting",
-                               out_folder_mode="datetime",
-                               sim_rationale=f"Testing the condition for the activation of the Tip Cells, I found "
-                                 f"that when V_pT_af equals the maximum range value ({V_pT_af_max:.2e}) and "
-                                 f"V_uc_af = {V_uc_af:.2e} [1 / tau], "
-                                 f"the vascular sprouting starts at tdf_i = {tdf_i:.2g} (i.e., when the tumor is "
-                                 f"very close to the final dimension. In this simulation, I evaluated the vascular "
-                                 f"sprouting for {n_steps} steps, which is the time required to the tumor to "
-                                 f"reach the final volume observed in patients.",
-                               slurm_job_id=slurm_job_id,
-                               save_distributed_files_to=distributed_data_folder)
-        sim.run()
-
-
-def timing_adaptive_vascular_sprouting_for_patient1():
-    # preamble
-    sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, distributed_data_folder = preamble()
-
-    # get sim parameters dataframe
-    sim_parameters_df = sim_parameters.as_dataframe()
-
-    # set parameters value leading to sprouting in patient1
-    tdf_i = 0.94  # tdf values for tip cell activation in patient1
+    # set parameters value leading to sprouting in patient0
+    tdf_i = 1.  # tdf values for tip cell activation in patient1
     sim_parameters.set_value("tdf_i", tdf_i)
     V_uc_af = 2.32  # V_uc_af values for tip cell activation in patient1
     sim_parameters.set_value("V_uc_af", V_uc_af)
-    V_pT_af_max = float(sim_parameters_df.loc["V_pT_af", "sim_range_max"])
-    sim_parameters.set_value("V_pT_af", 0.)
+    V_pT_af_max = float(sim_parameters.as_dataframe().loc["V_pT_af", "sim_range_max"])
+    sim_parameters.set_value("V_pT_af", V_pT_af_max)
 
-    # get number of step to reach the volume observed in patient1
-    n_steps = 20
+    # set a given number of steps
+    n_steps = 10
+    save_rate = 5
+
+    # selecting patient
+    patient0_parameters = patients_parameters["patient0"]
 
     # set sim rationale
-    sim_rationale = "Testing adaptive solver"
+    sim_rationale = "Testing mesh refinement"
+
+    # set traditional simulation
+    simulation = RHTimeSimulation(spatial_dimension=spatial_dimension,
+                                  sim_parameters=sim_parameters,
+                                  patient_parameters=patient0_parameters,
+                                  steps=n_steps,
+                                  save_rate=save_rate,
+                                  out_folder_name="dolfinx_patient0_mesh_refinement_CTRL",
+                                  sim_rationale=sim_rationale + "| CTRL",
+                                  slurm_job_id=slurm_job_id,
+                                  save_distributed_files_to=distributed_data_folder)
+    simulation.run()
 
     # set adaptive_simulation
     simulation = RHMeshAdaptiveSimulation(spatial_dimension=spatial_dimension,
                                           sim_parameters=sim_parameters,
-                                          patient_parameters=patients_parameters["patient1"],
+                                          patient_parameters=patient0_parameters,
                                           steps=n_steps,
-                                          save_rate=1,
-                                          out_folder_name="dolfinx_timing_adaptive_patient1",
-                                          sim_rationale=sim_rationale + " | ADAPTIVE",
+                                          save_rate=save_rate,
+                                          out_folder_name="dolfinx_patient0_mesh_refinement_MR",
+                                          sim_rationale=sim_rationale,
                                           slurm_job_id=slurm_job_id,
                                           save_distributed_files_to=distributed_data_folder)
     simulation.run()
