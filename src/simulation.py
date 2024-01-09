@@ -339,7 +339,7 @@ class RHSimulation:
         project(ufl.grad(self.af_old), target_func=self.grad_af_old)
 
         # define tip cell manager
-        self.tip_cell_manager = TipCellManager(self.mesh, self.sim_parameters)
+        self.tip_cell_manager = TipCellManager(self.mesh, sim_parameters)
 
     def __compute_af0(self, sim_parameters: Parameters, options: Dict = None):
         """
@@ -972,7 +972,7 @@ class RHAdaptiveSimulation(RHTimeSimulation):
                 break
 
             # update progress bar
-            self.pbar.update(self.dt_constant.value)
+            self.pbar.update(int(np.round(self.dt_constant.value)))
 
 
 class RHMeshAdaptiveSimulation(RHAdaptiveSimulation):
