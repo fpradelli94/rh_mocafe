@@ -339,7 +339,7 @@ class RHSimulation:
         project(ufl.grad(self.af_old), target_func=self.grad_af_old)
 
         # define tip cell manager
-        self.tip_cell_manager = TipCellManager(self.mesh, sim_parameters)
+        self.tip_cell_manager = TipCellManager(self.mesh, sim_parameters, n_checkpoints=30)
 
     def __compute_af0(self, sim_parameters: Parameters, options: Dict = None):
         """
