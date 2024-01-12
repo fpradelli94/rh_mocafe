@@ -19,6 +19,7 @@ import pandas as pd
 from pathlib import Path
 from matplotlib import colors
 import matplotlib.pyplot as plt
+from matplotlib import colormaps
 from mocafe.fenut.parameters import Parameters
 from src.simulation import get_ureg_with_arbitrary_units
 
@@ -266,11 +267,109 @@ def plot_activation_tiles1(tip_cell_activation_csv: str, save_to: Path):
     plt.savefig(save_to / Path("tiles.png"))
 
 
+def plot_activation_tiles2(tip_cell_activation_csv: str, save_to: Path):
+    """
+    Plot activation tiles with min tdf_i
+    """
+    # load data
+    tip_cell_activation_csv_path = Path(tip_cell_activation_csv)
+    min_tdf_i_csv_path = tip_cell_activation_csv_path.parent / Path("min_tdf_i.csv")
+    indata = pd.read_csv(min_tdf_i_csv_path, index_col="Unnamed: 0")
+
+    # load parameters
+    sim_parameters = pd.read_csv(tip_cell_activation_csv_path.parent / Path("sim_info/sim_parameters.csv"),
+                                 index_col="name")
+    with open(tip_cell_activation_csv_path.parent / Path("sim_info/patient_parameters.json"), "r") as infile:
+        patient_parameters = json.load(infile)
+
+    # load arbitrary units
+    ureg = get_ureg_with_arbitrary_units(Parameters(sim_parameters))
+
+    # Get labels and values for plot
+    # 1. V_pT_af
+    V_pT_af_col_name, = [col_name for col_name in indata.columns if "V_pT" in col_name]
+    V_pT_af_values = indata[V_pT_af_col_name].unique()
+    n_V_pT_af_values = len(V_pT_af_values)
+    # get labels from V_pT_af_values
+    V_pT_af_labels = [f"{V_pT_af:.2e}" for V_pT_af in V_pT_af_values]
+    V_pT_af_unit = sim_parameters.loc["V_pT_af", "sim_um"]
+    # 2. V_uc_af
+    V_uc_af_col_name, = [col_name for col_name in indata.columns if "V_uc" in col_name]
+    V_uc_af_values = indata[V_uc_af_col_name].unique()
+    n_V_uc_af_values = len(V_uc_af_values)
+    # get labels from V_uc_af
+    V_uc_af_labels = [f"{V_uc_af:.2e}" for V_uc_af in V_uc_af_values]
+    V_uc_af_unit = sim_parameters.loc["V_uc_af", "sim_um"]
+
+    # Generate matrix to plot
+    tca_matrix = np.zeros((n_V_uc_af_values, n_V_pT_af_values))
+    # check tip_cell_state
+    for i, V_uc_af in enumerate(V_uc_af_values[::-1]):
+        for j, V_pT_af in enumerate(V_pT_af_values):
+            # get subset of indata
+            subset = indata[np.isclose(indata[V_uc_af_col_name], V_uc_af) &
+                            np.isclose(indata[V_pT_af_col_name], V_pT_af)]
+            # check if tip cell is activated
+            if not np.isnan(subset["tip_cell_activated"].values[0]):
+                tca_matrix[i][j] = subset["tip_cell_activated"].values[0]
+
+    # Generate figure
+    fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(12, 8))
+
+    # Generate colormap
+    blues = colormaps["Blues"]
+    newcolors = blues(np.linspace(0, 1, 1000))
+    newcolors[0, :] = np.array([1., 1., 1., 1.])
+    cmap = colors.ListedColormap(newcolors)  # add white as color for 0
+
+    # set labels
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    ax.set_ylabel(fr"$V_{{uc}} [{V_uc_af_unit}]$")
+    ax.set_yticks(np.arange(n_V_uc_af_values))
+    ax.set_yticklabels(V_uc_af_labels[::-1])
+
+    ax.set_xlabel(fr"$V_{{pT}}$ [{V_pT_af_unit}]")
+    ax.set_xticks(np.arange(n_V_pT_af_values))
+    ax.set_xticklabels(V_pT_af_labels)
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right",
+             rotation_mode="anchor")
+
+    # set grid
+    ax.set_xticks(np.arange(-0.5, n_V_pT_af_values, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, n_V_uc_af_values, 1), minor=True)
+    ax.grid(which="minor", color="k", linestyle='-', linewidth=1)
+    ax.tick_params(which="minor", bottom=False, left=False)
+
+    # set imshow
+    im = ax.imshow(tca_matrix, cmap=cmap, vmin=0, vmax=1)
+
+    # Add volume to each square of the grid
+    for i in range(tca_matrix.shape[0]):
+        for j in range(tca_matrix.shape[1]):
+            if tca_matrix[i, j] > 0.:
+                text = ax.text(j, i, f"{tca_matrix[i, j]:.2g}",
+                               ha="center", va="center", color=cmap(np.round(1 - tca_matrix[i, j])))
+
+    # set colorbax
+    cbar = fig.colorbar(im, ax=ax, shrink=0.5)
+    cax = cbar.ax  # get axis
+    cax.get_yaxis().set_ticks(np.linspace(start=0, stop=1, num=5, endpoint=True))  # place two middle ticks
+    cax.get_yaxis().set_ticklabels(np.linspace(start=0, stop=1, num=5, endpoint=True), rotation=0, va="center")
+    cax.set_position([0.9, 0.25, 0.1, 0.5])
+
+    fig.subplots_adjust(top=0.95, right=0.85, left=0.17)
+    plt.savefig(save_to / Path("tdf_i_tiles.png"))
+
+
 if __name__ == "__main__":
     args = cli()
     if args.vis_type == 0:
         plot_activation_tiles0(args.tip_cell_activation_csv, Path(args.out_folder))
     elif args.vis_type == 1:
         plot_activation_tiles1(args.tip_cell_activation_csv, args.out_folder)
+    elif args.vis_type == 2:
+        plot_activation_tiles2(args.tip_cell_activation_csv, args.out_folder)
     else:
         raise NotImplementedError(f"Not implemented function type {args.vis_type}")
