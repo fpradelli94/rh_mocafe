@@ -209,7 +209,9 @@ class RHSimulation:
         self.lsp = {                                      # linear solver parameters
             "ksp_type": "gmres",
             "pc_type": "asm",
-            "ksp_monitor": None
+            "ksp_monitor": None,
+            "ksp_atol": 1e-6,
+            "ksp_rtol": 1e-6
         }
 
         # proprieties
@@ -288,7 +290,7 @@ class RHSimulation:
             self.vec_V = dolfinx.fem.FunctionSpace(self.mesh, ufl.VectorElement("P", self.mesh.ufl_cell(), 1))
         else:
             self.V = fu.get_mixed_function_space(mesh, 3)
-            self.vec_V = dolfinx.fem.FunctionSpace(mesh, ufl.VectorElement("P", self.mesh.ufl_cell(), 1))
+            self.vec_V = dolfinx.fem.FunctionSpace(mesh, ufl.VectorElement("P", mesh.ufl_cell(), 1))
 
         self.subV0_collapsed, self.collapsedV0_to_V = self.V.sub(0).collapse()
         logger.debug(f"DOFS: {self.V.dofmap.index_map.size_global}")
@@ -331,7 +333,7 @@ class RHSimulation:
 
         # af
         logger.info(f"{self.out_folder_name}:Computing af0...")
-        self.__compute_af0(sim_parameters)
+        self._compute_af0(sim_parameters)
 
         # af gradient
         logger.info(f"{self.out_folder_name}:Computing grad_af0...")
@@ -341,7 +343,7 @@ class RHSimulation:
         # define tip cell manager
         self.tip_cell_manager = TipCellManager(self.mesh, sim_parameters, n_checkpoints=30)
 
-    def __compute_af0(self, sim_parameters: Parameters, options: Dict = None):
+    def _compute_af0(self, sim_parameters: Parameters, options: Dict = None):
         """
         Solve equilibrium system for af considering the initial values of phi and c.
 
@@ -665,6 +667,11 @@ class RHTimeSimulation(RHSimulation):
 
         # define solver
         self.solver = NewtonSolver(comm_world, problem)
+        # Set Newton solver options
+        self.solver.atol = 1e-6
+        self.solver.rtol = 1e-6
+        self.solver.convergence_criterion = "incremental"
+        self.solver.max_it = 100
         self.solver.report = True  # report iterations
         # set options for krylov solver
         opts = PETSc.Options()
@@ -868,7 +875,7 @@ class RHAdaptiveSimulation(RHTimeSimulation):
 
         # init dt values
         self.min_dt = int(np.round(self.sim_parameters.get_value("dt")))
-        self.max_dt = 30 * self.min_dt
+        self.max_dt = 50 * self.min_dt
         self.dt_constant = dolfinx.fem.Constant(
             self.mesh, dolfinx.default_scalar_type(self.min_dt)
         )
@@ -1442,10 +1449,7 @@ class RHTestTipCellActivation(RHSimulation):
 
         self.df_standard_params: pd.DataFrame = self.sim_parameters.as_dataframe()
 
-    def run(self, append_result_to_csv: str or None = None, **kwargs) -> bool:
-        """
-        Run simulation for tip cell activation. Return True if a runtime error occurred, False otherwise.
-        """
+    def setup(self):
         self._check_simulation_properties()  # Check class proprieties. Return error if something does not work.
 
         self._sim_mkdir()  # create all simulation folders
@@ -1460,14 +1464,29 @@ class RHTestTipCellActivation(RHSimulation):
 
         self._generate_sim_parameters_independent_initial_conditions()
 
+    def run(self, find_min_tdf_i: bool = False, append_result_to_csv: str or None = None, **kwargs) -> bool:
+        """
+        Run simulation for tip cell activation. Return True if a runtime error occurred, False otherwise.
+        """
+        self.setup()
+
         # get params dictionary
         self._generate_test_parameters(**kwargs)
+
+        # check tdf_i presence
+        if find_min_tdf_i:
+            assert "tdf_i" not in self.params_dictionary.keys(), "Cannot set tdf_i while looking for the min value"
 
         # generate column name
         columns_name = ["tip_cell_activated",
                         *[f"{k} (range: [{np.amin(r)}, {np.amax(r)}])" for k, r in self.params_dictionary.items()]]
 
         tip_cell_activation_df = self._setup_output_dataframe(columns_name, append_result_to_csv)
+
+        if find_min_tdf_i:
+            min_tdf_i_df = self._setup_output_dataframe(columns_name, None)
+        else:
+            min_tdf_i_df = None
 
         # init pbar
         self._set_pbar(total=len(list(product(*self.params_dictionary.values()))))
@@ -1480,17 +1499,42 @@ class RHTestTipCellActivation(RHSimulation):
                 logger.debug(f"Setting  {param_name} to {param_value}")
                 current_sim_parameters.set_value(param_name, param_value)
 
-            # generate sim parameters dependent initial conditions
-            self._generate_sim_parameters_dependent_initial_conditions(sim_parameters=current_sim_parameters)
+            if find_min_tdf_i:
+                # set tdf_i to 1
+                current_sim_parameters.set_value("tdf_i", 1.)
+                # generate initial conditions
+                self._generate_sim_parameters_dependent_initial_conditions(sim_parameters=current_sim_parameters)
+                # check if tc_activation occurrs
+                tc_activated = self.tip_cell_manager.test_tip_cell_activation(self.c_old, self.af_old, self.grad_af_old)
+                # store result in dataframe
+                tip_cell_activation_df = tip_cell_activation_df.append(
+                    {col: val for col, val in zip(columns_name, [tc_activated, *param_values])},
+                    ignore_index=True
+                )
+                # find min tdf_i value
+                if tc_activated:
+                    # find min tdf_i
+                    min_tdf_i_for_condition = self._find_min_tdf_i(current_sim_parameters)
+                else:
+                    min_tdf_i_for_condition = None
+                # store it to dataframe
+                min_tdf_i_df = min_tdf_i_df.append(
+                    {col: val for col, val in zip(columns_name, [min_tdf_i_for_condition, *param_values])},
+                    ignore_index=True
+                )
 
-            # call activate tip cell
-            tc_activated = self.tip_cell_manager.test_tip_cell_activation(self.c_old, self.af_old, self.grad_af_old)
+            else:
+                # generate sim parameters dependent initial conditions
+                self._generate_sim_parameters_dependent_initial_conditions(sim_parameters=current_sim_parameters)
 
-            # store result in dataframe
-            tip_cell_activation_df = tip_cell_activation_df.append(
-                {col: val for col, val in zip(columns_name, [tc_activated, *param_values])},
-                ignore_index=True
-            )
+                # call activate tip cell
+                tc_activated = self.tip_cell_manager.test_tip_cell_activation(self.c_old, self.af_old, self.grad_af_old)
+
+                # store result in dataframe
+                tip_cell_activation_df = tip_cell_activation_df.append(
+                    {col: val for col, val in zip(columns_name, [tc_activated, *param_values])},
+                    ignore_index=True
+                )
 
             # update pbar
             self.pbar.update(1)
@@ -1498,10 +1542,29 @@ class RHTestTipCellActivation(RHSimulation):
         # write dataframe to csv
         if rank == 0:
             tip_cell_activation_df.to_csv(f"{self.data_folder}/tipcell_activation.csv")
+            if find_min_tdf_i:
+                min_tdf_i_df.to_csv(f"{self.data_folder}/min_tdf_i.csv")
 
         self._end_simulation()  # conclude time iteration
 
         return self.runtime_error_occurred
+
+    def _find_min_tdf_i(self, current_sim_parameters, min_tdf_i: float = 0., max_tdf_i: float = 1.):
+        if max_tdf_i - min_tdf_i < 0.05:
+            return max_tdf_i
+        else:
+            # set the mean between the two tdf_i as new test tdf_i
+            test_tdf_i = (max_tdf_i + min_tdf_i) / 2
+            current_sim_parameters.set_value("tdf_i", test_tdf_i)
+            # generate initial conditions
+            self._generate_sim_parameters_dependent_initial_conditions(sim_parameters=current_sim_parameters)
+            # test tip cell activation
+            tc_activated = self.tip_cell_manager.test_tip_cell_activation(self.c_old, self.af_old, self.grad_af_old)
+            logger.info(f"Current test tdf_i: {test_tdf_i} | tc_activated: {tc_activated}")
+            if tc_activated:
+                return self._find_min_tdf_i(current_sim_parameters, min_tdf_i=min_tdf_i, max_tdf_i=test_tdf_i)
+            else:
+                return self._find_min_tdf_i(current_sim_parameters, min_tdf_i=test_tdf_i, max_tdf_i=max_tdf_i)
 
     def _sim_mkdir(self):
         super()._sim_mkdir_list(self.data_folder, self.report_folder, self.reproduce_folder)

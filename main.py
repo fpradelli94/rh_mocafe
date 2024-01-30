@@ -26,7 +26,7 @@ logging.root.setLevel(logging.DEBUG)  # setting root logger level
 
 
 def main():
-    src.experiments.patient1_time_adaptive_vascular_sprouting()
+    src.experiments.time_adaptive_vascular_sprouting("patient2")
 
 
 if __name__ == "__main__":

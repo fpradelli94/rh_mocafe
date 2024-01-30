@@ -55,6 +55,14 @@ def preamble():
     return sim_parameters, patients_parameters, args.slurm_job_id, spatial_dimension, distributed_data_folder
 
 
+def timer(method):
+    t0 = time.perf_counter()
+    method()
+    tfin = time.perf_counter() - t0
+    if MPI.COMM_WORLD.rank == 0:
+        logger.info(f"Time (size: {MPI.COMM_WORLD.size}): {tfin} [seconds]")
+
+
 def test_2d():
     # preamble
     sim_parameters, patients_parameters, _, _, _ = preamble()
@@ -91,8 +99,8 @@ def compute_initial_condition_for_each_patient():
         sim = RHTimeSimulation(spatial_dimension=spatial_dimension,
                                sim_parameters=sim_parameters,
                                patient_parameters=current_patient_parameter,
-                               steps=0,
-                               save_rate=10,
+                               steps=1,
+                               save_rate=1,
                                out_folder_name=f"dolfinx_patient{patient_number}_initial_condition",
                                sim_rationale=f"Computed initial condition for patient{patient_number}",
                                slurm_job_id=slurm_job_id,
@@ -113,26 +121,23 @@ def check_tip_cell_activation_for_each_patient():
     # Conditions to test
     # 1. We test a tdf_i range from 0.2 to 1 (i.e. initial tumor volume ranges from 20% to 100% of the size reported by
     #    clinicians).
-    tdf_i_range = np.linspace(start=0.2, stop=1.0, num=5, endpoint=True)
-    tdf_i_range = [tdf_i_range[3]]
+    tdf_i_range = np.linspace(start=0.0, stop=1.0, num=5, endpoint=True)
     # 2. We test different value of af tumor secretion (V_pT_af). As the experimental range spans over different orders
     #    of magnitudes, we test 5 points over the log scale between the minimum and the maximal V_pT_af.
     V_pT_af_min = float(sim_parameters_df.loc["V_pT_af", "sim_range_min"])
     V_pT_af_max = float(sim_parameters_df.loc["V_pT_af", "sim_range_max"])
     V_pT_af_range = np.logspace(np.log10(V_pT_af_min), np.log10(V_pT_af_max), num=5, endpoint=True)
-    V_pT_af_range = [V_pT_af_max]
     # 3. We test different value of capillary uptake (V_uc_af). The values range from twice the natural VEGF degradation
     #    rate to 10 times the value provided by Travasso et al. (2011)
     V_uc_af_min = float(sim_parameters_df.loc["V_d_af", "sim_range_min"])
-    V_uc_af_max = 10 * float(sim_parameters_df.loc["V_uc_af", "sim_value"])
+    V_uc_af_max = 100 * float(sim_parameters_df.loc["V_uc_af", "sim_value"])
     V_uc_af_range = np.logspace(np.log10(V_uc_af_min), np.log10(V_uc_af_max), num=5, endpoint=True)
-    V_uc_af_range = [V_uc_af_max]
     # 4. We test different value of the minimal concentration required for tip cell activation (T_c). We test 4
     #    log points from 0 to 10 times the estimated value
     T_c_estimated = float(sim_parameters.get_value("T_c"))
     T_c_range = np.array([0., (T_c_estimated / 10), T_c_estimated, (10 * T_c_estimated)])
 
-    for patient_number in [0]:
+    for patient_number in [0, 1, 2]:
         logger.info(f"Starting tip cell activation test for patient{patient_number}")
 
         current_patient_parameter = patients_parameters[f"patient{patient_number}"]  # load patient params
@@ -140,38 +145,12 @@ def check_tip_cell_activation_for_each_patient():
         sim = RHTestTipCellActivation(spatial_dimension=spatial_dimension,
                                       standard_params=sim_parameters,
                                       patient_parameters=current_patient_parameter,
-                                      out_folder_name=f"dolfinx_patient{patient_number}_tip-cell-activation",
+                                      out_folder_name=f"dolfinx_patient{patient_number}_tip-cell-activation_full",
                                       slurm_job_id=slurm_job_id)
         sim.run(tdf_i=tdf_i_range,
                 V_pT_af=V_pT_af_range,
                 V_uc_af=V_uc_af_range,
                 T_c=T_c_range)
-
-
-# def tip_cell_activation_patient1():
-#     # preamble
-#     sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, _ = preamble()
-#
-#     # get sim parameters dataframe
-#     sim_parameters_df = sim_parameters.as_dataframe()
-#
-#     # Conditions to test
-#     tdf_i_range = np.linspace(start=0.8, stop=1.0, num=21, endpoint=True)
-#     V_pT_af_max = float(sim_parameters_df.loc["V_pT_af", "sim_range_max"])
-#     V_pT_af_range = [V_pT_af_max]
-#     V_uc_af_range = [float(sim_parameters_df.loc["V_d_af", "sim_range_min"]),
-#                      2.32]  # got from older tip cell activation
-#
-#     # Test tip cell activation
-#     sim = RHTestTipCellActivation(spatial_dimension=spatial_dimension,
-#                                   standard_params=sim_parameters,
-#                                   patient_parameters=patients_parameters["patient1"],
-#                                   out_folder_name=f"dolfinx_patient1_tip-cell-activation",
-#                                   out_folder_mode="datetime",
-#                                   slurm_job_id=slurm_job_id)
-#     sim.run(tdf_i=tdf_i_range,
-#             V_pT_af=V_pT_af_range,
-#             V_uc_af=V_uc_af_range)
 
 
 def vascular_sprouting_one_step(patient: str):
@@ -193,7 +172,7 @@ def vascular_sprouting_one_step(patient: str):
     sim_parameters.set_value("V_pT_af", V_pT_af_max)
 
     # get number of step to reach the volume observed in patient1
-    n_steps = 2
+    n_steps = 1
 
     # run simulation
     sim = RHTimeSimulation(spatial_dimension=spatial_dimension,
@@ -205,7 +184,7 @@ def vascular_sprouting_one_step(patient: str):
                            sim_rationale=f"Testing for 2 simulation step",
                            slurm_job_id=slurm_job_id,
                            save_distributed_files_to=distributed_data_folder)
-    sim.run()
+    timer(sim.run)
 
 
 def patient1_time_adaptive_vascular_sprouting():
@@ -252,132 +231,44 @@ def patient1_time_adaptive_vascular_sprouting():
         sim.run()
 
 
-def find_min_rh_volume_for_tc_activation_patient_0_and_2():
-    """
-    Patient 0 and patient 2 have a bigger tumor volume than patient 1, so the experiment
-    `check_tip_cell_activation_for_each_patient`
-    """
-    # preamble
-    sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, _ = preamble()
-
-    # get sim parameters dataframe
-    sim_parameters_df = sim_parameters.as_dataframe()
-
-    # Conditions to test
-    tdf_i_range = np.linspace(start=0.2/20, stop=0.2, num=20, endpoint=True)
-
-    V_pT_af_max = float(sim_parameters_df.loc["V_pT_af", "sim_range_max"])
-    V_pT_af_range = [V_pT_af_max]
-    sim_parameters.set_value("V_pT_af", V_pT_af_max)
-
-    V_uc_af_min = float(sim_parameters_df.loc["V_d_af", "sim_range_min"])
-    V_uc_af_max = 10 * float(sim_parameters_df.loc["V_uc_af", "sim_value"])
-    V_uc_af_range = np.logspace(np.log10(V_uc_af_min), np.log10(V_uc_af_max), num=5, endpoint=True)
-    V_uc_af_range = V_uc_af_range[0:-1]
-
-    for patient in ["patient0", "patient2"]:
-        sim_rationale = \
-            (f"From the simulation on patient1, I found that only a few parameters values lead to tip cell activation"
-             f"for such a small tumor.  V_pT_af = {V_pT_af_max:.2e} and V_uc_af = [{V_uc_af_range[0]:.2e}, "
-             f"{V_uc_af_range[1]:.2e}]. With this simulation, I want to check which value of tdf_i leads to tip cells "
-             f"activation for each condition in {patient}.")
-
-        # Test tip cell activation
-        sim = RHTestTipCellActivation(spatial_dimension=spatial_dimension,
-                                      standard_params=sim_parameters,
-                                      patient_parameters=patients_parameters[patient],
-                                      out_folder_name=f"dolfinx_{patient}_tip-cell-activation",
-                                      out_folder_mode="datetime",
-                                      sim_rationale=sim_rationale,
-                                      slurm_job_id=slurm_job_id)
-        sim.run(tdf_i=tdf_i_range,
-                V_pT_af=V_pT_af_range,
-                V_uc_af=V_uc_af_range)
-
-
-def tip_cell_activation_V_pT_and_V_uc_ranges_for_each_patient():
-    # preamble
-    sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, _ = preamble()
-
-    # get sim parameters dataframe
-    sim_parameters_df = sim_parameters.as_dataframe()
-
-    # get min tdf_i for each patient
-    min_tdf_i = {
-        "patient0": 0.04,
-        "patient1": 0.6,
-        "patient2": 0.05
-    }
-
-    # set V_uc_af range
-    V_uc_af_min = float(sim_parameters_df.loc["V_d_af", "sim_range_min"])
-    V_uc_af_range = np.linspace(start=V_uc_af_min,
-                                stop=2.32,
-                                num=21, endpoint=True)
-    # set V_pT_af_range
-    V_pT_af_max = float(sim_parameters_df.loc["V_pT_af", "sim_range_max"])
-    V_pT_af_range = np.linspace(start=2.,
-                                stop=V_pT_af_max,
-                                num=11, endpoint=True)
-
-    for patient in ["patient1"]:
-        sim_rationale = \
-            (f"From Tip Cell Activation experiments, I determined the minimum volume required to induce vascular "
-             f"sprouting for each patient. For this patient, the minimum volume corrspond to tdf_i = "
-             f"{min_tdf_i[patient]}. In this simulation, I am checking which values of V_pT_af and V_uc_af lead"
-             f" to tip cell activation.")
-
-        # Test tip cell activation
-        sim = RHTestTipCellActivation(spatial_dimension=spatial_dimension,
-                                      standard_params=sim_parameters,
-                                      patient_parameters=patients_parameters[patient],
-                                      out_folder_name=f"dolfinx_{patient}_tip-cell-activation_Vranges",
-                                      sim_rationale=sim_rationale,
-                                      slurm_job_id=slurm_job_id)
-        sim.run(tdf_i=[min_tdf_i[patient]],
-                V_pT_af=V_pT_af_range,
-                V_uc_af=V_uc_af_range)
-
-
-def patient0_time_adaptive_vascular_sprouting():
+def time_adaptive_vascular_sprouting(patient: str):
     # preamble
     sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, distributed_data_folder = preamble()
-
-    # get sim parameters dataframe
-    sim_parameters_df = sim_parameters.as_dataframe()
 
     # set patient
     patient = "patient0"
 
-    # set parameters value leading to sprouting in patient0
-    tdf_i = 0.05
+    # get sim parameters dataframe
+    sim_parameters_df = sim_parameters.as_dataframe()
+
+    # parameters values leading to sprouting in patient0
+    tdf_i = 0.062
     sim_parameters.set_value("tdf_i", tdf_i)
     V_pT_af_max = float(sim_parameters_df.loc["V_pT_af", "sim_range_max"])
     sim_parameters.set_value("V_pT_af", V_pT_af_max)
-    # get V_uc_af
     V_uc_af_min = float(sim_parameters_df.loc["V_d_af", "sim_range_min"])
-    V_uc_af_max = 10 * float(sim_parameters_df.loc["V_uc_af", "sim_value"])
-    V_uc_af_range = np.logspace(np.log10(V_uc_af_min), np.log10(V_uc_af_max), num=5, endpoint=True)
-    V_uc_af = V_uc_af_range[1]
-    sim_parameters.set_value("V_uc_af", V_uc_af)
+    V_uc_af_range = np.logspace(0, 4, num=10, endpoint=True) * V_uc_af_min
+    V_uc_af_range = V_uc_af_range[:3]
 
-    # get number of step to reach the volume observed in patient1
-    n_steps = int(np.round((np.log(1 / tdf_i) / np.log(float(sim_parameters.get_value("tgr"))))))
+    n_steps = 1662  # about one month
 
-    # run simulation
-    sim = RHAdaptiveSimulation(spatial_dimension=spatial_dimension,
-                               sim_parameters=sim_parameters,
-                               patient_parameters=patients_parameters[patient],
-                               steps=n_steps,
-                               save_rate=50,
-                               out_folder_name=f"dolfinx_{patient}_vascular-sprouting-adaptive_tdf_i={tdf_i:.2g}",
-                               sim_rationale=f"Testing the condition for the activation of the Tip Cells, I found "
-                                             f"that when V_pT_af equals the maximum range value ({V_pT_af_max:.2e}) and "
-                                             f"V_uc_af = {V_uc_af:.2e} [1 / tau], "
-                                             f"the vascular sprouting starts at tdf_i = {tdf_i:.2g}",
-                               slurm_job_id=slurm_job_id,
-                               save_distributed_files_to=distributed_data_folder)
-    sim.run()
+    for V_uc_af_value in V_uc_af_range:
+        sim_parameters.set_value("V_uc_af", V_uc_af_value)
+
+        # run simulation
+        sim = RHAdaptiveSimulation(spatial_dimension=spatial_dimension,
+                                   sim_parameters=sim_parameters,
+                                   patient_parameters=patients_parameters[patient],
+                                   steps=n_steps,
+                                   save_rate=50,
+                                   out_folder_name=f"dolfinx_{patient}_vascular-sprout-adap_V_uc={V_uc_af_value:.2g}",
+                                   sim_rationale=f"Simulation for representative case of {patient }with tdf_i = "
+                                                 f"{tdf_i}; V_pT_af = ({V_pT_af_max:.2e}) and V_uc_af = "
+                                                 f"{V_uc_af_value:.2e} [1 / tau], the vascular sprouting starts at "
+                                                 f"tdf_i = {tdf_i:.2g}",
+                                   slurm_job_id=slurm_job_id,
+                                   save_distributed_files_to=distributed_data_folder)
+        sim.run()
 
 
 def test_convergence_1_step(patient: str):
@@ -543,3 +434,85 @@ def timing_mesh_refinement_patient0():
                                           slurm_job_id=slurm_job_id,
                                           save_distributed_files_to=distributed_data_folder)
     simulation.run()
+
+
+def misc_tc_activation_tests():
+    """
+    tc activation tests to complete the activation matrices
+    """
+    # preamble
+    sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, _ = preamble()
+
+    # get sim parameters dataframe
+    sim_parameters_df = sim_parameters.as_dataframe()
+
+    # find min tcf_i for  V_pT = 7.7
+    # 1. we set tdf_i range to contain all tdf_i for which we observe activation also for the highest value
+    tdf_i_range = [1]
+    # 2. we set V_pT_af
+    V_pT_af_min = float(sim_parameters_df.loc["V_pT_af", "sim_range_min"])
+    V_pT_af_max = float(sim_parameters_df.loc["V_pT_af", "sim_range_max"])
+    V_pT_af_range = np.logspace(np.log10(V_pT_af_min), np.log10(V_pT_af_max), num=5, endpoint=True)
+    V_pT_af_range = [V_pT_af_max]
+    # 3. We set V_uc
+    V_uc_af_min = float(sim_parameters_df.loc["V_d_af", "sim_range_min"])
+    V_uc_af_range = np.linspace(start=10, stop=100, num=11, endpoint=True) * V_uc_af_min
+    # set patient
+    p = "patient0"
+    logger.info(f"Starting tip cell activation test for patient0")
+    sim = RHTestTipCellActivation(spatial_dimension=spatial_dimension,
+                                  standard_params=sim_parameters,
+                                  patient_parameters=patients_parameters[p],
+                                  out_folder_name=f"dolfinx_{p}_tip-cell-activation",
+                                  slurm_job_id=slurm_job_id)
+    sim.run(tdf_i=tdf_i_range,
+            V_pT_af=V_pT_af_range,
+            V_uc_af=V_uc_af_range)
+
+
+def find_min_tdf_i():
+    # preamble
+    sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, _ = preamble()
+    # get sim parameters dataframe
+    sim_parameters_df = sim_parameters.as_dataframe()
+
+    # 2. we set V_pT_af
+    V_pT_af_min = float(sim_parameters_df.loc["V_pT_af", "sim_range_min"])
+    V_pT_af_max = float(sim_parameters_df.loc["V_pT_af", "sim_range_max"])
+    V_pT_af_range = np.logspace(np.log10(V_pT_af_min), np.log10(V_pT_af_max), num=10, endpoint=True)
+    # 3. We set V_uc
+    V_uc_af_min = float(sim_parameters_df.loc["V_d_af", "sim_range_min"])
+    V_uc_af_range = np.logspace(0, 4, num=10, endpoint=True) * V_uc_af_min
+
+    # set patient
+    for p in [0, 1, 2]:
+        patient = f"patient{p}"
+        logger.info(f"Starting tip cell activation test for {patient}")
+        sim = RHTestTipCellActivation(spatial_dimension=spatial_dimension,
+                                      standard_params=sim_parameters,
+                                      patient_parameters=patients_parameters[patient],
+                                      out_folder_name=f"dolfinx_{p}_find_min_tdf_i",
+                                      slurm_job_id=slurm_job_id,
+                                      sim_rationale=f"Finding min tdf_i")
+        sim.run(find_min_tdf_i=True,
+                V_pT_af=V_pT_af_range,
+                V_uc_af=V_uc_af_range)
+
+def test_time_adaptation():
+    # preamble
+    sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, distributed_data_folder = preamble()
+
+    sim_parameters.set_value("T_c", 500)
+
+    patient = "patient0"
+    sim = RHAdaptiveSimulation(spatial_dimension=spatial_dimension,
+                               sim_parameters=sim_parameters,
+                               patient_parameters=patients_parameters[patient],
+                               steps=100,
+                               save_rate=50,
+                               out_folder_name=f"dolfinx_{patient}_test_time_adaptiation",
+                               slurm_job_id=slurm_job_id,
+                               save_distributed_files_to=distributed_data_folder)
+    sim.run()
+
+
