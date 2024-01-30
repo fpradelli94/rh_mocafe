@@ -235,9 +235,6 @@ def time_adaptive_vascular_sprouting(patient: str):
     # preamble
     sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, distributed_data_folder = preamble()
 
-    # set patient
-    patient = "patient0"
-
     # get sim parameters dataframe
     sim_parameters_df = sim_parameters.as_dataframe()
 
