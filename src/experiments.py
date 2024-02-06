@@ -268,6 +268,49 @@ def time_adaptive_vascular_sprouting(patient: str):
         sim.run()
 
 
+def time_adaptive_vascular_sprouting_2d(patient: str):
+    # preamble
+    sim_parameters, patients_parameters, slurm_job_id, _, _ = preamble()
+
+    # get sim parameters dataframe
+    sim_parameters_df = sim_parameters.as_dataframe()
+
+    # parameters values leading to sprouting in patient0
+    tdf_i = {
+        "patient0": np.array([0.062, 0.031, 0.031]),
+        "patient1": np.array([0.22, 0.094, 0.16]),
+        "patient2": np.array([0.031, 0.031, 0.031])
+    }
+    V_pT_af_max = float(sim_parameters_df.loc["V_pT_af", "sim_range_max"])
+    sim_parameters.set_value("V_pT_af", V_pT_af_max)
+    V_uc_af_min = float(sim_parameters_df.loc["V_d_af", "sim_range_min"])
+    V_uc_af_range = np.logspace(0, 4, num=10, endpoint=True) * V_uc_af_min
+    V_uc_af_range = V_uc_af_range[:3]
+
+    # compute n_steps
+    tgr = sim_parameters_df.loc["tgr", "sim_value"]
+    n_steps = {p: np.floor(-(np.log(tdf_i_array) / np.log(tgr))).astype(int) for p, tdf_i_array in tdf_i.items()}
+
+    for V_uc_af_value, tdf_i_value, n_steps_value in zip(V_uc_af_range, tdf_i[patient], n_steps[patient]):
+        sim_parameters.set_value("V_uc_af", V_uc_af_value)
+        sim_parameters.set_value("tdf_i", float(tdf_i_value))
+
+        # run simulation
+        sim = RHAdaptiveSimulation(spatial_dimension=2,
+                                   sim_parameters=sim_parameters,
+                                   patient_parameters=patients_parameters[patient],
+                                   steps=n_steps_value,
+                                   save_rate=1000,
+                                   out_folder_name=f"dolfinx_{patient}_vascular-sprout-adap_V_uc={V_uc_af_value:.2g}_2d",
+                                   sim_rationale=f"Simulation for representative case of {patient} with tdf_i = "
+                                                 f"{tdf_i_value}; V_pT_af = ({V_pT_af_max:.2e}) and V_uc_af = "
+                                                 f"{V_uc_af_value:.2e} [1 / tau], the vascular sprouting starts at "
+                                                 f"tdf_i = {tdf_i_value:.2g}",
+                                   slurm_job_id=slurm_job_id,
+                                   max_dt=100)
+        sim.run()
+
+
 def test_convergence_1_step(patient: str):
     sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, distributed_data_folder = preamble()
 
@@ -495,6 +538,35 @@ def find_min_tdf_i():
                 V_pT_af=V_pT_af_range,
                 V_uc_af=V_uc_af_range)
 
+
+def find_min_tdf_i_2d():
+    # preamble
+    sim_parameters, patients_parameters, slurm_job_id, _, _ = preamble()
+    # get sim parameters dataframe
+    sim_parameters_df = sim_parameters.as_dataframe()
+
+    # 2. we set V_pT_af
+    V_pT_af_min = float(sim_parameters_df.loc["V_pT_af", "sim_range_min"])
+    V_pT_af_max = float(sim_parameters_df.loc["V_pT_af", "sim_range_max"])
+    V_pT_af_range = np.logspace(np.log10(V_pT_af_min), np.log10(V_pT_af_max), num=10, endpoint=True)
+    # 3. We set V_uc
+    V_uc_af_min = float(sim_parameters_df.loc["V_d_af", "sim_range_min"])
+    V_uc_af_range = np.logspace(0, 4, num=10, endpoint=True) * V_uc_af_min
+
+    # set patient
+    for p in [0, 1, 2]:
+        patient = f"patient{p}"
+        logger.info(f"Starting tip cell activation test for {patient}")
+        sim = RHTestTipCellActivation(spatial_dimension=2,
+                                      standard_params=sim_parameters,
+                                      patient_parameters=patients_parameters[patient],
+                                      out_folder_name=f"dolfinx_{p}_find_min_tdf_i_2d",
+                                      slurm_job_id=slurm_job_id,
+                                      sim_rationale=f"Finding min tdf_i")
+        sim.run(find_min_tdf_i=True,
+                V_pT_af=V_pT_af_range,
+                V_uc_af=V_uc_af_range)
+
 def test_time_adaptation():
     # preamble
     sim_parameters, patients_parameters, slurm_job_id, spatial_dimension, distributed_data_folder = preamble()
@@ -511,5 +583,4 @@ def test_time_adaptation():
                                slurm_job_id=slurm_job_id,
                                save_distributed_files_to=distributed_data_folder)
     sim.run()
-
 

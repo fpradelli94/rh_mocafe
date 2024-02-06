@@ -766,6 +766,32 @@ class RHTimeSimulation(RHSimulation):
 
 
 class RHAdaptiveSimulation(RHTimeSimulation):
+    def __init__(self,
+                 spatial_dimension: int,
+                 sim_parameters: Parameters,
+                 patient_parameters: Dict,
+                 steps: int,
+                 save_rate: int = 1,
+                 out_folder_name: str = mansim.default_data_folder_name,
+                 out_folder_mode: str = None,
+                 sim_rationale: str = "No comment",
+                 slurm_job_id: int = None,
+                 save_distributed_files_to: str or None = None,
+                 stop_with_zero_tc=True,
+                 max_dt: int = None):
+        super().__init__(spatial_dimension=spatial_dimension,
+                         sim_parameters=sim_parameters,
+                         patient_parameters=patient_parameters,
+                         steps=steps,
+                         save_rate=save_rate,
+                         out_folder_name=out_folder_name,
+                         out_folder_mode=out_folder_mode,
+                         sim_rationale=sim_rationale,
+                         slurm_job_id=slurm_job_id,
+                         save_distributed_files_to=save_distributed_files_to,
+                         stop_with_zero_tc=stop_with_zero_tc)
+        self.max_dt_steps = 50 if max_dt is None else max_dt
+
     def _solve_problem(self):
         logger.debug(f"Solving problem...")
         try:
@@ -875,7 +901,7 @@ class RHAdaptiveSimulation(RHTimeSimulation):
 
         # init dt values
         self.min_dt = int(np.round(self.sim_parameters.get_value("dt")))
-        self.max_dt = 50 * self.min_dt
+        self.max_dt = self.max_dt_steps * self.min_dt
         self.dt_constant = dolfinx.fem.Constant(
             self.mesh, dolfinx.default_scalar_type(self.min_dt)
         )
