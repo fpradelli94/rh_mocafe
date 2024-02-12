@@ -987,15 +987,9 @@ class RHAdaptiveSimulation(RHTimeSimulation):
             # assign new value to grad_af_old
             project(ufl.grad(self.af_old), target_func=self.grad_af_old)
 
-            # set adaptive save rate
-            if current_n_tc == 0:
-                current_save_rate = self.save_rate * 100
-            else:
-                current_save_rate = self.save_rate
-
             # save
-            if (((self.t - self.last_writing_time) > current_save_rate)
-                    or (self.t == self.steps)
+            if (((self.t - self.last_writing_time) > self.save_rate)
+                    or (self.t >= self.steps)
                     or self.runtime_error_occurred):
                 self._write_files(self.t)
                 self.last_writing_time = self.t

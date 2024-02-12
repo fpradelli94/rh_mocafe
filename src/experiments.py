@@ -270,7 +270,7 @@ def time_adaptive_vascular_sprouting(patient: str):
 
 def time_adaptive_vascular_sprouting_2d(patient: str):
     # preamble
-    sim_parameters, patients_parameters, slurm_job_id, _, _ = preamble()
+    sim_parameters, patients_parameters, slurm_job_id, _, distributed_data_folder = preamble()
 
     # get sim parameters dataframe
     sim_parameters_df = sim_parameters.as_dataframe()
@@ -295,18 +295,22 @@ def time_adaptive_vascular_sprouting_2d(patient: str):
         sim_parameters.set_value("V_uc_af", V_uc_af_value)
         sim_parameters.set_value("tdf_i", float(tdf_i_value))
 
+        # set save rate in order to have 100 snaps
+        save_rate = int(np.floor(n_steps_value / 100))
+
         # run simulation
         sim = RHAdaptiveSimulation(spatial_dimension=2,
                                    sim_parameters=sim_parameters,
                                    patient_parameters=patients_parameters[patient],
                                    steps=n_steps_value,
-                                   save_rate=1000,
+                                   save_rate=save_rate,
                                    out_folder_name=f"dolfinx_{patient}_vascular-sprout-adap_V_uc={V_uc_af_value:.2g}_2d",
                                    sim_rationale=f"Simulation for representative case of {patient} with tdf_i = "
                                                  f"{tdf_i_value}; V_pT_af = ({V_pT_af_max:.2e}) and V_uc_af = "
                                                  f"{V_uc_af_value:.2e} [1 / tau], the vascular sprouting starts at "
                                                  f"tdf_i = {tdf_i_value:.2g}",
                                    slurm_job_id=slurm_job_id,
+                                   save_distributed_files_to=distributed_data_folder,
                                    max_dt=100)
         sim.run()
 
