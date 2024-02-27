@@ -35,7 +35,11 @@ def cli():
     parser = argparse.ArgumentParser(description="Minimal parser for activation tiles")
     parser.add_argument("tip_cell_activation_csv", help="CSV containing tc activation data")
     parser.add_argument("out_folder", help="folder where to store the resulting img")
-    parser.add_argument("--vis_type", type=int, help="visualization function to use")
+    parser.add_argument("--vis_type", type=int, help="visualization function to use: "
+                                                     "0: plain tiles plot for different parameters (see preprint); "
+                                                     "1: plain tiles plot for different V_uc and V_pT values; "
+                                                     "2: min tdf_i tiles plot for tumor volume; "
+                                                     "3: min tdf_i tiles plot for tumor diameter")
     return parser.parse_args()
 
 
@@ -267,10 +271,10 @@ def plot_activation_tiles1(tip_cell_activation_csv: str, save_to: Path):
     plt.savefig(save_to / Path("tiles.png"))
 
 
-def plot_activation_tiles2(tip_cell_activation_csv: str, save_to: Path, diameter: bool = False):
-    """
-    Plot activation tiles with min tdf_i
-    """
+def _plot_activation_tiles2(tip_cell_activation_csv: str,
+                            fig: plt.figure,
+                            ax: plt.axes,
+                            diameter: bool = False):
     # load data
     tip_cell_activation_csv_path = Path(tip_cell_activation_csv)
     min_tdf_i_csv_path = tip_cell_activation_csv_path.parent / Path("min_tdf_i.csv")
@@ -279,8 +283,6 @@ def plot_activation_tiles2(tip_cell_activation_csv: str, save_to: Path, diameter
     # load parameters
     sim_parameters = pd.read_csv(tip_cell_activation_csv_path.parent / Path("sim_info/sim_parameters.csv"),
                                  index_col="name")
-    with open(tip_cell_activation_csv_path.parent / Path("sim_info/patient_parameters.json"), "r") as infile:
-        patient_parameters = json.load(infile)
 
     # load arbitrary units
     ureg = get_ureg_with_arbitrary_units(Parameters(sim_parameters))
@@ -327,9 +329,6 @@ def plot_activation_tiles2(tip_cell_activation_csv: str, save_to: Path, diameter
     # convert to percentage
     tca_matrix = tca_matrix
 
-    # Generate figure
-    fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(12, 8))
-
     # Generate colormap
     if diameter:
         base = colormaps["pink"]
@@ -345,11 +344,11 @@ def plot_activation_tiles2(tip_cell_activation_csv: str, save_to: Path, diameter
 
     ax.set_ylabel(fr"$V_{{uc}} [{V_uc_af_unit}]$", fontsize=18)
     ax.set_yticks(np.arange(n_V_uc_af_values))
-    ax.set_yticklabels(V_uc_af_labels[::-1])
+    ax.set_yticklabels(V_uc_af_labels[::-1], fontsize=16)
 
     ax.set_xlabel(fr"$V_{{pT}}$ [{V_pt_af_unit}]", fontsize=18)
     ax.set_xticks(np.arange(n_V_pT_af_values))
-    ax.set_xticklabels(V_pT_af_labels)
+    ax.set_xticklabels(V_pT_af_labels, fontsize=16)
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right",
              rotation_mode="anchor")
 
@@ -366,19 +365,29 @@ def plot_activation_tiles2(tip_cell_activation_csv: str, save_to: Path, diameter
     for i in range(tca_matrix.shape[0]):
         for j in range(tca_matrix.shape[1]):
             if tca_matrix[i, j] > 0.:
-                if diameter:
-                    text_color = cmap(0.05) if tca_matrix[i, j] > 0.5 else cmap(0.9)
-                else:
-                    text_color = cmap(1 - tca_matrix[i, j])
+                text_color = cmap(0.05) if tca_matrix[i, j] > 0.5 else cmap(0.9)
                 ax.text(j, i, f"{(tca_matrix[i, j] * 100):.0f}%", ha="center", va="center",
-                        color=text_color)
+                        color=text_color, fontsize=18)
 
     # set colorbax
     cbar = fig.colorbar(im, ax=ax, shrink=0.5)
     cax = cbar.ax  # get axis
     cax.get_yaxis().set_ticks(np.linspace(start=0, stop=1, num=5, endpoint=True))  # place two middle ticks
-    cax.get_yaxis().set_ticklabels(np.linspace(start=0, stop=100, num=5, endpoint=True), rotation=0, va="center")
+    cax.get_yaxis().set_ticklabels(np.linspace(start=0, stop=100, num=5, endpoint=True), rotation=0, va="center",
+                                   fontsize=16)
     cax.set_position([0.9, 0.25, 0.1, 0.5])
+
+    return fig, ax
+
+
+def plot_activation_tiles2(tip_cell_activation_csv: str, save_to: Path, diameter: bool = False):
+    """
+    Plot activation tiles with min tdf_i
+    """
+    # Generate figure
+    fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(12, 8))
+
+    fig, ax = _plot_activation_tiles2(tip_cell_activation_csv, fig, ax, diameter)
 
     fig.tight_layout()
     if save_to.is_dir():
@@ -389,6 +398,26 @@ def plot_activation_tiles2(tip_cell_activation_csv: str, save_to: Path, diameter
     else:
         out_png = save_to
     plt.savefig(out_png)
+
+
+def subplot_activation_tiles2(diameter: bool = False):
+    # Genrate figure
+    fig, axs = plt.subplots(nrows=1, ncols=3, figsize=(30, 15), sharey=True)
+
+    # Get input data
+    base_folder = Path("/home/francop/PycharmProjects/rh_mocafe/saved_sim_dolfinx_archive/")
+    input_csvs = [
+        base_folder / Path("patient0/dolfinx_patient0_find_min_tdf_i/tipcell_activation.csv"),
+        base_folder / Path("patient1/dolfinx_1_find_min_tdf_i/tipcell_activation.csv"),
+        base_folder / Path("patient2/dolfinx_patient2_find_min_tdf_i/tipcell_activation.csv")
+    ]
+
+    # plot
+    for ax, input_csv in zip(axs.ravel(), input_csvs):
+        fig, ax = _plot_activation_tiles2(input_csv, fig, ax)
+    fig.tight_layout()
+    plt.savefig("temp.png")
+
 
 
 if __name__ == "__main__":
