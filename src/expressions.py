@@ -168,18 +168,8 @@ class VesselReconstruction:
             distance_ce[point_index] = self.distance_to_edge_for_center[index_of_closest_c]
 
         """
-        2. Compute the value to assign at each coordinate using the sigmoid defined as follows:
-
-                            +1  ---------------
-                                               \
-                                                \
-                                                 \
-                                                | -------------------- -1
-                                                |
-                                            distance_ce
+        2. Compute the value to assign at each coordinate 
         """
-        # value = ((np.exp(distance_ce * self.slope) + (-1 * np.exp(self.slope * distance_of_closest_c)))
-        #          / (np.exp(distance_ce * self.slope) + np.exp(self.slope * distance_of_closest_c)))
         value = np.where(distance_of_closest_c < distance_ce, 1., -1.)
 
         """
