@@ -209,9 +209,7 @@ class RHSimulation:
         self.lsp = {                                      # linear solver parameters
             "ksp_type": "gmres",
             "pc_type": "asm",
-            "ksp_monitor": None,
-            "ksp_atol": 1e-6,
-            "ksp_rtol": 1e-6
+            "ksp_monitor": None
         }
 
         # proprieties
@@ -668,8 +666,6 @@ class RHTimeSimulation(RHSimulation):
         # define solver
         self.solver = NewtonSolver(comm_world, problem)
         # Set Newton solver options
-        self.solver.atol = 1e-6
-        self.solver.rtol = 1e-6
         self.solver.convergence_criterion = "incremental"
         self.solver.max_it = 100
         self.solver.report = True  # report iterations
@@ -790,7 +786,7 @@ class RHAdaptiveSimulation(RHTimeSimulation):
                          slurm_job_id=slurm_job_id,
                          save_distributed_files_to=save_distributed_files_to,
                          stop_with_zero_tc=stop_with_zero_tc)
-        self.max_dt_steps = 50 if max_dt is None else max_dt
+        self.max_dt_steps = 30 if max_dt is None else max_dt
 
     def _solve_problem(self):
         logger.debug(f"Solving problem...")
@@ -921,8 +917,6 @@ class RHAdaptiveSimulation(RHTimeSimulation):
 
         # define solver
         self.solver = NewtonSolver(comm_world, problem)
-        self.solver.atol = 1e-6
-        self.solver.rtol = 1e-6
         self.solver.convergence_criterion = "incremental"
         self.solver.max_it = 100
         self.solver.report = True  # report iterations
