@@ -8,5 +8,7 @@ __pycache__
 /input_patients_data/old/
 /misc/
 /.venv
+temp/
+notebooks/.ipynb_checkpoints/
 Pipfile*
 visualization/python/out/
