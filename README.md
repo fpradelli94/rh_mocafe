@@ -1,4 +1,4 @@
-# Simulating Retinal Hemangioblastoma with FEniCS and Mocafe
+# Simulating Retinal Hemangioblastoma with DOLFINx and Mocafe
 
 <p align="center">
   <img src=".thumbs/MovieS1.gif" />
@@ -7,26 +7,25 @@
 **************************************************************************
 
 The materials contained in this folder allow the reproduction of the simulations of RH development
-and angiogenesis with FEniCS and Mocafe.
+and angiogenesis with DOLFINx and Mocafe.
 
 ## Quick instructions
 The full code to reproduce our results and to test our implementation is contained in  `main.py`. 
 To ensure full reproducibility, we recommend to use [Singularity](https://github.com/sylabs/singularity):
 
-todo: CONTAINER CHANGED
 ```shell
 # pull container
-singularity build sif/mocafe_v1-5-0.sif library://fpradelli94/mocafe/mocafe:1.5.0
+singularity singularity push mocafex.sif library://fpradelli94/mocafex/mocafex:dev
 # execute main in the container
-singularity exec sif/mocafe_v1-5-0.sif python3 main.py
+singularity exec mocafex.sif python3 main.py
 ```
 
 We also recommend to run the script in parallel to save time. To do so, you can exploit `mpirun` typing the following:
 ```shell
 # run over 4 cores
-singularity exec mocafe_v1-5-0.sif mpirun -n 4 python3 main.py
+singularity exec mocafex.sif mpirun -n 4 python3 main.py
 # run over x cores, according to your system
-singularity exec mocafe_v1-5-0.sif mpirun -n x python3 main.py
+singularity exec mocafex.sif mpirun -n x python3 main.py
 ```
 
 If you don’t have Singularity installed, just follow the instructions provided at the official documentation page for 
@@ -35,9 +34,8 @@ If you don’t have Singularity installed, just follow the instructions provided
 By default, the simulation output will be stored in `saved_sim`. For a detailed explanation of the generated files, 
 see section "Simulation output".
 
-> :warning: Notice that 3D simulations require a considerable computational effort, so consider using an 
-> appropriate machine to reproduce that. For instance, it required about 24 h and about 150 GB of RAM to simulate 
-> 300 steps of tumor development and angiogenesis.
+> :warning: 3D simulations require a consistent computational effort, so consider using an 
+> appropriate machine to reproduce that. To test the code, you can run 2D simulations.
 
 ## Slurm integration
 Our code is compatible with [slurm](https://slurm.schedmd.com/documentation.html). If you use slurm to run
@@ -47,7 +45,7 @@ our code, it is recommended to use a `sbatch` script like the following:
 #!/bin/bash
 #SBATCH --job-name rh_mocafe
 
-srun singularity exec sif/mocafe_v1-5-0.sif python3 main.py -slurm_job_id $SLURM_JOB_ID
+srun singularity exec sif/mocafex.sif python3 main.py -slurm_job_id $SLURM_JOB_ID
 ex=$?
 ```
 
@@ -58,6 +56,7 @@ The result of a simulation is a folder with the following structure:
 ```shell
 .
 ├── 0_reproduce
+├── sim_info
 ├── af.h5
 ├── af.xdmf
 ├── c.h5
@@ -86,12 +85,12 @@ You can load these file in ParaView to visualize them. [^1]
 There are also three additional folders:
 - `0_reproduce` contains a copy of the script used to generate the simulation. 
 Useful to check the exact code used to generate the results.
-- `resume` contains the data to resume the simulation (i.e. start a new simulation using the end of another simulation as initial condition). See `main.py` for an example.
 - `sim_info` contains:
   - `incremental_tipcells.json`: data for every tip cell at each time step.
   - `mesh_parameters.csv`: info regarding the mesh used for the simulation.
   - `sim_info.html`: info regarding the simulation [^2]
   - `sim_parameters.csv`: the parameters used in the simulation.
+  - `patient_parameters.json`: the patient-specific parameters for the given simulation
 
 ## GitHub and Zenodo [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.7330072.svg)](https://doi.org/10.5281/zenodo.7330072)
 
@@ -108,26 +107,22 @@ This repository contains several folders:
 ├── notebooks
 ├── saved_sim
 ├── saved_sim_archive # only on Zenodo
-├── sif               # only on Zenodo
 ├── src
 └── visualization
 ```
 
 Let's see them one by one: 
 
-### :file_folder: `input_images`
-Contains patient-specific images, derived from the Optical Coherence Tomography Angiography. 
+### :file_folder: `input_patients_data`
+Contains patient-specific images, derived from the Optical Coherence Tomography Angiography. They are 
+used in the program to generate the initial condition for the simulation. 
 
-They are used in the program to generate the initial condition for the simulation.
+It also contain the patient parameters (e.g. RH dimension) in the `patients_parameters.json` file.
 
 ### :file_folder: `notebooks`
-Contains two Jupyter Notebooks :
-- `parameters.ipynb` : Generates the `.csv` table of the simulation's parameters.
-- `vessels_image_processing` : process the images contained in `input_images` to generate the binaries used to 
-reconstruct the initial capillaries in 3D
+Contains the Jupyter Notebooks `parameters.ipynb`, which generates the `.csv` table of the simulation's parameters.
 
-The output of the notebooks is in `notebooks/out`. You can generate it running the notebooks, or you can find them on 
-Zenodo. 
+The output of the notebook is in `notebooks/out`. You can generate it running the notebooks. 
 
 ### :file_folder: `saved_sim`
 This folder will be generated at the first simulation and will contain the simulation files, if you run some 
@@ -139,16 +134,6 @@ Contains the results of the simulations shown in the manuscript in Figure 2 and 
 The recommended way to visualize the simulation result is [ParaView](https://www.paraview.org/). [^1]
 
 Also, you can consider using the visualization script provided in `visualization` subfolder.
-
-### :file_folder: `sif`
-On Zenodo, contains the Mocafe Singularity container used to run the simulations. It is recommended to use the same container
-to ensure reproducibility.
-
-The recommended way to access the same container is to pull it from the cloud library:
-
-```shell
-singularity build sif/mocafe_v1-5-0.sif library://fpradelli94/mocafe/mocafe:1.5.0
-```
 
 ### :file_folder: `src`
 Contains the source code used in the `main.py` script. 
