@@ -25,6 +25,15 @@ def parse_cli_args():
     return parser.parse_args()
 
 
+def moving_average(a: np.ndarray, n: int = 3) -> np.ndarray:
+    """
+    Compute the moving average of the given array
+    """
+    ret = np.cumsum(a, dtype=float)
+    ret[n:] = ret[n:] - ret[:-n]
+    return ret[n - 1:] / n
+
+
 def main():
     args = parse_cli_args()
 
@@ -53,14 +62,21 @@ def main():
     steps = np.zeros(n_steps)
     n_tc = np.zeros(n_steps)
 
+    # get arrays
     for i, key in enumerate(tip_cells_in_time.keys()):
         steps[i] = float(key.replace("step_", ""))
         n_tc[i] = len(tip_cells_in_time[key])
 
+    # compute moving average for the number of activated tipcells
+    window_size = 51
+    moving_average_n_tc = moving_average(n_tc, n=window_size)
+
     # plot
-    plt.plot(steps, n_tc, linewidth=3)
+    plt.plot(steps, n_tc, linewidth=1, alpha=0.3, label="Instant TC number", color="tab:blue")
+    plt.plot(steps[int(np.floor(window_size / 2)):-int(np.floor(window_size / 2))], moving_average_n_tc,
+             linewidth=3, color="tab:blue", label=f"Moving average (window size={window_size})")
     plt.xlabel("steps", fontsize=20)
-    plt.ylabel("n TCs", fontsize=20)
+    plt.legend()
 
     # adjust
     figure = plt.gcf()
