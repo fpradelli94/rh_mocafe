@@ -1,0 +1,24 @@
+name,info,real_value,real_range_max,real_range_min,real_um,sim_value,sim_range_max,sim_range_min,sim_um,references
+SpaceArbitraryUnit,,800,,,micrometer,1.0,,,SpaceArbitraryUnit,
+TimeArbitraryUnit,,26,,,minute,1.0,,,TimeArbitraryUnit,
+AFsArbitraryUnit,,6000.0,,,picogram / milliliter,1.0,,,afau,
+D_af,Diffusivity of angiogenic factor,4.2415938159916675e-05,6.536000894e-05,1.9471867379833354e-05,millimeter ** 2 / second,0.10338884926479691,0.15931502179125,0.047462676738343805,SpaceArbitraryUnit ** 2 / TimeArbitraryUnit,"Estimated from Kihara, T., Ito, J., & Miyake, J. (2013). Measurement of Biomolecular Diffusion in Extracellular Matrix Condensed by Fibroblasts Using Fluorescence Correlation Spectroscopy. PLoS ONE, 8(11), 82382. https://doi.org/10.1371/JOURNAL.PONE.0082382"
+V_d_af,Angiogenic factor degradation rate,0.918,1.008,0.8280000000000001,1 / hour,0.3978,0.43679999999999997,0.3588,1 / TimeArbitraryUnit,"Vempati, P., Popel, A. S., & Gabhann, F. Mac. (2014). Extracellular regulation of VEGF: isoforms, proteolysis, and vascular patterning. Cytokine Growth Factor Rev, 25(1), 1-19. https://doi.org/10.1016/j.cytogfr.2013.11.002"
+V_pT_af,Angiogenic factor production rate inside the tumor,47.27472674454134,47.27472674454134,0.03330043644898509,1 / hour,12.291428953580752,12.291428953580752,0.008658113476736125,afau / tau,"Estimated from Finley, S. D., Dhar, M., & Popel, A. S. (2013). Compartment model predicts VEGF secretion and investigates the effects of VEGF Trap in tumor-bearing mice. Frontiers in Oncology, 3 JUL, 196. https://doi.org/10.3389/fonc.2013.00196"
+V_uc_af,Angiogenic factor uptake in capillaries,0.8280000000000001,8280.0,0.8280000000000001,1 / hour,0.3588,3587.9999999999995,0.3588,1 / tau,Estimated from degradation
+R_c,Cell radius,10,,,micrometer,0.0125,,,SpaceArbitraryUnit,Milo et al. Nucl. Acids Res. (2010) 38 (suppl 1): D750-D753.; ID: 100432
+epsilon,Interface width,1.5625,,,micrometer ** 2,2.44140625e-06,,,SpaceArbitraryUnit ** 2,"Same provied by Travasso, R. D. M., Poire, E. C., Castro, M., Rodrguez-Manzaneque, J. C., & Hernandez-Machado, A. (2011). Tumor angiogenesis and vascular patterning: A mathematical model. PLoS ONE, 6(5), e19989. https://doi.org/10.1371/journal.pone.0019989"
+dt,Simulation time step,26,,,minute,1.0,,,TimeArbitraryUnit,"Same provied by Travasso, R. D. M., Poire, E. C., Castro, M., Rodrguez-Manzaneque, J. C., & Hernandez-Machado, A. (2011). Tumor angiogenesis and vascular patterning: A mathematical model. PLoS ONE, 6(5), e19989. https://doi.org/10.1371/journal.pone.0019989"
+T_p,Angiogenic factor concentration for maximum proliferation,1800.0000000000002,,,picogram / milliliter,0.3,,,AFsArbitraryUnit,None
+alpha_p,Endothelial cells proliferation rate,0.0005388888888888889,,,milliliter / hour / picogram,1.401111111111111,,,1 / AFsArbitraryUnit / TimeArbitraryUnit,
+T_c,Minimum af for Tip Cells Activation,3.0,,,nanogram / milliliter,0.5000000000000001,,,AFsArbitraryUnit,"Song, M. & Finley, S.D.Mechanistic characterization of endothelial sprouting mediated by pro-angiogenic signaling. Microcirculation 29, e12744(2022)."
+G_m,Minimum af gradient required for Tip Cells Activation,14.0,,,nanogram / milliliter / millimeter,1.8666666666666667,,,AFsArbitraryUnit / SpaceArbitraryUnit,"Shamloo, A., Ma, N., Poo, M. M., Sohn, L. L., & Heilshorn, S. C. (2008). Endothelial cell polarization and chemotaxis in a microfluidic device. Lab on a Chip, 8(8), 1292-1299. https://doi.org/10.1039/B719788H"
+phi_th,Minimum capillaries field value for Tip Cells activation,,,,,0.9,,,,
+G_M,af gradient for maximum tip cells velocity,42.0,,,nanogram / milliliter / millimeter,5.6,,,AFsArbitraryUnit / SpaceArbitraryUnit,
+phi_min,Min capillaries field value,,,,,-1.0,,,,
+phi_max,Max capillaries field value,,,,,1.0,,,,
+M,'Motility' for the capillaries phase field,1e-09,,,millimeter ** 2 / second,2.437500000000001e-06,,,SpaceArbitraryUnit ** 2 / TimeArbitraryUnit,
+chi,chemotactic constant for tip cells,0.008333333333333333,,,micrometer * milliliter * millimeter / minute / nanogram,0.0020312500000000005,,,SpaceArbitraryUnit ** 2 / AFsArbitraryUnit / TimeArbitraryUnit,
+min_tipcell_distance,Min Tip Cells distance (due to Notch pathway),40,,,micrometer,0.05,,,SpaceArbitraryUnit,
+tdf_i,Initial Tumor Dimension factor,1,,,None,1.0,,,None,None
+tgr,Tumor growth rate,1.35,1.5,,volume fraction per year,1.0000148353055012,1.0000200437266367,,volume fraction per tau,Estimated using Ye D. et al. (2012)
