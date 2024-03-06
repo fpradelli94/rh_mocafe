@@ -1,3 +1,6 @@
+"""
+Manage input/output in parallel
+"""
 import json
 import shutil
 import socket
