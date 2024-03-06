@@ -1,5 +1,5 @@
 """
-Contains methods and classes to run and resume simulations in 2D and 3D
+Contains methods and classes to run simulations in 2D and 3D
 """
 import sys
 import time
@@ -23,7 +23,6 @@ import mocafe.fenut.mansimdata as mansim
 from mocafe.math import project
 from mocafe.fenut.parameters import Parameters
 from mocafe.angie.tipcells import TipCellManager, load_tip_cells_from_json
-from mocafe.refine import nmm_interpolate
 import src.forms
 from src.ioutils import write_parameters, dump_json, move_files_once_per_node, rmtree_if_exists_once_per_node
 from src.expressions import RHEllipsoid, VesselReconstruction
@@ -187,12 +186,12 @@ class RHSimulation:
                  sim_rationale: str = "No comment",
                  slurm_job_id: int = None):
         """
-        Initialize a Simulation Object.
+        Initialize a Simulation Object. This serves as basis for all the other Simulation Objects.
 
         :param spatial_dimension: 2 == 2D simulation; 3 == 3D simulation.
-        :param sim_parameters: simulation parameters.
-        :param patient_parameters: patient-specific parameters.
-        :param out_folder_name: folder where the simulation will be saved:
+        :param sim_parameters: mathematical model parameters.
+        :param patient_parameters: patient-specific parameters (e.g. tumor dimension).
+        :param out_folder_name: folder where the simulation will be saved.
         :param out_folder_mode: if ``None``, the output folder name will be exactly the one specified in
         out_folder_name; if ``datetime``, the output folder name will be also followed by a string containing the date
         and the time of the simulation (e.g. ``saved_sim/my_sim/2022-09-25_15-51-17-610268``).
@@ -201,7 +200,7 @@ class RHSimulation:
         parameter). It will be added to the simulation report in ``saved_sim/sim_name/sim_info/sim_info.html``. Default
         is "No comment".
         :param slurm_job_id: slurm job ID assigned to the simulation, if performed with slurm. It is used to generate a
-        pbar stored in ``slurm/<slurm job ID>.pbar``.
+        progress bar stored in ``slurm/<slurm job ID>.pbar``. Default is None.
         """
         # parameters
         self.sim_parameters: Parameters = sim_parameters  # simulation parameters
@@ -238,11 +237,17 @@ class RHSimulation:
             self.pbar_file = sys.stdout
 
     def _check_simulation_properties(self):
+        """
+        Check if the simulation was initialized correctly
+        """
         # check spatial dimension
         assert (self.spatial_dimension == 2 or self.spatial_dimension == 3), \
             f"Cannot run simulation for dimension {self.spatial_dimension}"
 
     def _sim_mkdir_list(self, *folders_list: Path):
+        """
+        Generate all the relevant folders to be used in the simulation.
+        """
         if rank == 0:
             # generate simulation folder
             for folder in folders_list:
@@ -253,6 +258,9 @@ class RHSimulation:
                 self.slurm_folder.mkdir(exist_ok=True)
 
     def _fill_reproduce_folder(self):
+        """
+        Store the code used to generate the simulation in the "reproduce" folder.
+        """
         if rank == 0:
             # patterns ignored when copying code after simulation
             ignored_patterns = ["README.md",
@@ -276,12 +284,18 @@ class RHSimulation:
                             ignore=shutil.ignore_patterns(*ignored_patterns))
 
     def _generate_mesh(self):
+        """
+        Generate the mesh for the simulation
+        """
         self.mesh, self.mesh_parameters = compute_mesh(self.spatial_dimension,
                                                        self.sim_parameters,
                                                        self.patient_parameters,
                                                        self.ureg)
 
     def _spatial_discretization(self, mesh: dolfinx.mesh.Mesh = None):
+        """
+        Generate the spatial discretization (by default, Continuous Lagrange elements)
+        """
         logger.info(f"Generating spatial discretization")
         if mesh is None:
             self.V = fu.get_mixed_function_space(self.mesh, 3)
@@ -294,13 +308,16 @@ class RHSimulation:
         logger.debug(f"DOFS: {self.V.dofmap.index_map.size_global}")
 
     def _generate_u_old(self):
+        """
+        Generate the function u_old, used to store the previous staatus of the simulation
+        """
         logger.info(f"Initializing u old... ")
         self.u_old = dolfinx.fem.Function(self.V)
         self.af_old, self.c_old, self.mu_old = self.u_old.split()
 
     def _generate_sim_parameters_independent_initial_conditions(self):
         """
-        Generate initial conditions not depending on from the simulaion parameters
+        Generate initial conditions not depending on from the mathematical model parameters
         """
         # capillaries
         compute_c0(self.spatial_dimension, self.c_old, self.patient_parameters, self.mesh_parameters)
@@ -343,10 +360,8 @@ class RHSimulation:
 
     def _compute_af0(self, sim_parameters: Parameters, options: Dict = None):
         """
-        Solve equilibrium system for af considering the initial values of phi and c.
-
-        Basically, this function is used to generate the initial condition for af assuming that af is at equilibrium
-        at the beginning of the simulation.
+        Solve equilibrium system for af considering the initial values of phi and c. It is used to generate the
+        initial condition for af.
         """
         # manage none dict
         if options is None:
@@ -388,6 +403,9 @@ class RHSimulation:
         ksp.destroy()
 
     def _set_pbar(self, total: int):
+        """
+        Generate progress bar
+        """
         self.pbar = tqdm(total=total,
                          ncols=100,
                          desc=self.out_folder_name,
@@ -395,6 +413,9 @@ class RHSimulation:
                          disable=True if rank != 0 else False)
 
     def _end_simulation(self):
+        """
+        Perform all the operations that need to be carried out at the end of the simulation
+        """
         logger.info("Ending simulation... ")
 
         # close pbar file
@@ -432,13 +453,12 @@ class RHTimeSimulation(RHSimulation):
                  out_folder_mode: str = None,
                  sim_rationale: str = "No comment",
                  slurm_job_id: int = None,
-                 save_distributed_files_to: str or None = None,
-                 stop_with_zero_tc=True):
+                 save_distributed_files_to: str or None = None):
         """
-        Initialize a Simulation Object.
+        Initialize a Simulation Object to simulate tumor-induced angiogenesis and tumor growth in time.
 
         :param spatial_dimension: 2 == 2D simulation; 3 == 3D simulation.
-        :param sim_parameters: simulation parameters.
+        :param sim_parameters: mathematical model's parameters.
         :param patient_parameters: patient-specific parameters.
         :param steps: simulation steps in time.
         :param save_rate: frequency of simulation state saves in terms of steps. E.g., if ``save_rate=10``, the
@@ -453,6 +473,10 @@ class RHTimeSimulation(RHSimulation):
         is "No comment".
         :param slurm_job_id: slurm job ID assigned to the simulation, if performed with slurm. It is used to generate a
         pbar stored in ``slurm/<slurm job ID>.pbar``.
+        :param save_distributed_files_to: if the simulation runs in parallel different nodes, specify if you want your
+        simulation results to be saved as vtk in the different nodes and the location where they will be stored.
+        The location must be an existing folder present on each node. At the end of the simulation, the files will be
+        moved in the actual output under the sup-folder 'pvd'.
         """
         # init super class
         super().__init__(spatial_dimension=spatial_dimension,
@@ -466,11 +490,15 @@ class RHTimeSimulation(RHSimulation):
         # specific properties
         self.steps: int = steps  # simulations steps
         self.save_rate: int = save_rate  # set how often writes the output
+        self.lsp = {  # linear solver parameters
+            "ksp_type": "gmres",
+            "pc_type": "gasm",
+            "ksp_monitor": None
+        }
 
         # specific flags
         self.__resumed: bool = False  # secret flag to check if simulation has been resumed
         self.save_distributed_files = (save_distributed_files_to is not None)  # Use PVD files instead of XDMF
-        self.stop_with_zero_tc = stop_with_zero_tc
 
         # specific folders
         if self.save_distributed_files:
@@ -522,6 +550,10 @@ class RHTimeSimulation(RHSimulation):
         return self.runtime_error_occurred
 
     def setup_convergence_test(self):
+        """
+        Method used to set up the simulation for a convergence test. Used to check the best preconditioner or solver
+        to be used in your specific system.
+        """
         self._check_simulation_properties()  # Check class proprieties. Return error if something does not work.
 
         self._sim_mkdir()  # create all simulation folders
@@ -537,6 +569,9 @@ class RHTimeSimulation(RHSimulation):
         self._set_up_problem()
 
     def test_convergence(self, lsp: Dict = None):
+        """
+        Run the simulation for une step using the given linear solver parameters (lsp).
+        """
         if lsp is not None:
             self.lsp = lsp
 
@@ -556,6 +591,9 @@ class RHTimeSimulation(RHSimulation):
             super()._sim_mkdir_list(self.distributed_data_folder, self.pvd_folder)
 
     def _generate_initial_conditions(self):
+        """
+        Generate initial conditions for the simulation
+        """
         # generate u_old
         super()._generate_u_old()
         # generate initial conditions independent of sim parameters
@@ -564,7 +602,9 @@ class RHTimeSimulation(RHSimulation):
         super()._generate_sim_parameters_dependent_initial_conditions(self.sim_parameters)
 
     def _write_files(self, t: int, write_mesh: bool = False):
-
+        """
+        Write simulation files as XDMF or PVD (if you want your simulation to be stored in parallel on each node).
+        """
         for fun, name, f_file in zip([self.af_old, self.c_old, self.grad_af_old, self.phi, self.t_c_f_function],
                                      ["af", "c", "grad_af", "phi", "tipcells"],
                                      [self.af_file, self.c_file, self.grad_af_file, self.phi_file, self.tipcells_file]):
@@ -645,6 +685,9 @@ class RHTimeSimulation(RHSimulation):
             logger.error(str(e))
 
     def _time_iteration(self, test_convergence: bool = False):
+        """
+        Run the simulation in time.
+        """
         # define weak form
         logger.info(f"{self.out_folder_name}:Defining weak form...")
         u = dolfinx.fem.Function(self.V)
@@ -734,18 +777,20 @@ class RHTimeSimulation(RHSimulation):
             # save
             if ((step % self.save_rate == 0) or
                     (step == self.steps) or
-                    self.runtime_error_occurred or
-                    (self.stop_with_zero_tc and (n_tcs == 0))):
+                    self.runtime_error_occurred):
                 self._write_files(step)
 
             # update progress bar
             self.pbar.update(1)
 
             # if error occurred, stop iteration
-            if self.runtime_error_occurred or test_convergence or (self.stop_with_zero_tc and (n_tcs == 0)):
+            if self.runtime_error_occurred or test_convergence:
                 break
 
     def _end_simulation(self):
+        """
+        Perform all the operations that need to be carried out at the end of the simulation
+        """
         # close files
         self.c_file.close()
         self.af_file.close()
@@ -773,8 +818,32 @@ class RHAdaptiveSimulation(RHTimeSimulation):
                  sim_rationale: str = "No comment",
                  slurm_job_id: int = None,
                  save_distributed_files_to: str or None = None,
-                 stop_with_zero_tc=True,
                  max_dt: int = None):
+        """
+        Initialize a Simulation Object to simulate tumor-induced angiogenesis and tumor growth in time using an
+        adaptive time-stepping scheme.
+
+        :param spatial_dimension: 2 == 2D simulation; 3 == 3D simulation.
+        :param sim_parameters: mathematical model's parameters.
+        :param patient_parameters: patient-specific parameters.
+        :param steps: simulation steps in time.
+        :param save_rate: frequency of simulation state saves in terms of steps. E.g., if ``save_rate=10``, the
+        simulation will be saved every 10 steps. By default, the last simulation step is always saved.
+        :param out_folder_name: folder where the simulation will be saved:
+        :param out_folder_mode: if ``None``, the output folder name will be exactly the one specified in
+        out_folder_name; if ``datetime``, the output folder name will be also followed by a string containing the date
+        and the time of the simulation (e.g. ``saved_sim/my_sim/2022-09-25_15-51-17-610268``).
+        The latter is recommended to run multiple simulations of the same kind. Default is ```None``.
+        :param sim_rationale: provide a rationale for running this simulation (e.g. checking the effect of this
+        parameter). It will be added to the simulation report in ``saved_sim/sim_name/sim_info/sim_info.html``. Default
+        is "No comment".
+        :param slurm_job_id: slurm job ID assigned to the simulation, if performed with slurm. It is used to generate a
+        pbar stored in ``slurm/<slurm job ID>.pbar``.
+        :param save_distributed_files_to: if the simulation runs in parallel different nodes, specify if you want your
+        simulation results to be saved as vtk in the different nodes and the location where they will be stored.
+        The location must be an existing folder present on each node. At the end of the simulation, the files will be
+        moved in the actual output under the sup-folder 'pvd'.
+        """
         super().__init__(spatial_dimension=spatial_dimension,
                          sim_parameters=sim_parameters,
                          patient_parameters=patient_parameters,
@@ -784,11 +853,13 @@ class RHAdaptiveSimulation(RHTimeSimulation):
                          out_folder_mode=out_folder_mode,
                          sim_rationale=sim_rationale,
                          slurm_job_id=slurm_job_id,
-                         save_distributed_files_to=save_distributed_files_to,
-                         stop_with_zero_tc=stop_with_zero_tc)
+                         save_distributed_files_to=save_distributed_files_to)
         self.max_dt_steps = 30 if max_dt is None else max_dt
 
     def _solve_problem(self):
+        """
+        Solve the PDE problem
+        """
         logger.debug(f"Solving problem...")
         try:
             self.solver.solve(self.u)
@@ -801,7 +872,7 @@ class RHAdaptiveSimulation(RHTimeSimulation):
 
     def _check_tc_activation_at_dt(self, putative_dt):
         """
-        Check if, after dt, the conditions for tc activation hold
+        Check if, after dt, the conditions for tc activation are met
         """
         # log
         logger.info(f"Checking tc activation at dt={putative_dt}")
@@ -835,6 +906,9 @@ class RHAdaptiveSimulation(RHTimeSimulation):
     def _find_next_activation_dt(self,
                                  dt0: float,
                                  dt1: float) -> int:
+        """
+        Find the dt value after which the TC activation conditions are met, if any.
+        """
         # check if dt0 < dt1
         assert dt0 < dt1, "dt0 should be always less than dt1"
 
@@ -861,6 +935,9 @@ class RHAdaptiveSimulation(RHTimeSimulation):
                 return self._find_next_activation_dt(mid_dt, dt1)
 
     def _active_tc_routine(self):
+        """
+        Manage active tip cells and RH growth
+        """
         # set dt value to min
         self.dt_constant.value = self.min_dt
 
@@ -886,6 +963,9 @@ class RHAdaptiveSimulation(RHTimeSimulation):
         self.phi.x.scatter_forward()
 
     def _time_iteration(self, test_convergence: bool = False):
+        """
+        Run the simulation in time.
+        """
         # define weak form
         logger.info(f"{self.out_folder_name}:Defining weak form...")
         self.u = dolfinx.fem.Function(self.V)
@@ -996,453 +1076,6 @@ class RHAdaptiveSimulation(RHTimeSimulation):
             self.pbar.update(int(np.round(self.dt_constant.value)))
 
 
-class RHMeshAdaptiveSimulation(RHAdaptiveSimulation):
-    def __init__(self,
-                 spatial_dimension: int,
-                 sim_parameters: Parameters,
-                 patient_parameters: Dict,
-                 steps: int,
-                 save_rate: int = 1,
-                 out_folder_name: str = mansim.default_data_folder_name,
-                 out_folder_mode: str = None,
-                 sim_rationale: str = "No comment",
-                 slurm_job_id: int = None,
-                 save_distributed_files_to=None,
-                 refine_rate: int = 5):
-        super().__init__(spatial_dimension,
-                         sim_parameters,
-                         patient_parameters,
-                         steps,
-                         save_rate,
-                         out_folder_name,
-                         out_folder_mode,
-                         sim_rationale,
-                         slurm_job_id,
-                         save_distributed_files_to)
-        # Define refinement-specific constants
-        self.refine_rate = refine_rate  # set how frequently the mesh should be updated
-        self.refine_counter = 0  # set a counter to keep track of the number of refinements
-        self.stop_adapting = False  # set a flag to stop refining
-        self.af_residual_tolerance = 1e-5  # set tolerance for af residual
-        self.c_gradient_tolerance = 0.9  # set tolerance for c gradient
-        self.max_mesh_refinement_cycles = 15  # set maximum refinement cycles
-        self.mesh_refinement_epsilon = 4 * np.sqrt(self.sim_parameters.get_value("epsilon"))  # set max h
-
-        self.Tc = self.sim_parameters.get_value("T_c")
-        self.Gm = self.sim_parameters.get_value("G_m")
-        tc_max_speed = float(self.sim_parameters.get_value("G_M")) * float(self.sim_parameters.get_value("chi"))
-        tc_min_speed = self.Gm * float(self.sim_parameters.get_value("chi"))
-        self.tc_mean_speed = (tc_max_speed + tc_min_speed) / 2
-
-    def _spatial_discretization(self, mesh: dolfinx.mesh.Mesh = None):
-        # call spatial discretization
-        super()._spatial_discretization(mesh)
-
-        # add other collapsed subspace
-        self.subV1_collapsed, self.collapsedV1_to_V = self.V.sub(1).collapse()
-        self.subV2_collapsed, self.collapsedV2_to_V = self.V.sub(2).collapse()
-
-    def _generate_coarse_mesh(self):
-        logger.info(f"Generating coarse mesh")
-        self.coarse_mesh, _ = compute_mesh(self.spatial_dimension,
-                                           self.sim_parameters,
-                                           self.patient_parameters,
-                                           self.ureg,
-                                           n_factor=0.1)
-        self.coarse_mesh.topology.create_entities(1)  # create entities for refinement
-
-    def _get_high_af_residual_edges(self,
-                                    adapted_mesh: dolfinx.mesh.Mesh):
-        logger.debug(f"AF based refinement")
-        # init dt constant
-        dt_constant = dolfinx.fem.Constant(adapted_mesh, dolfinx.default_scalar_type(self.dt_constant.value))
-
-        # interpolate function on adapted function space
-        a_af_old = nmm_interpolate(dolfinx.fem.Function(self.subV0_collapsed), self.af_old_collapsed)
-        a_c_old = nmm_interpolate(dolfinx.fem.Function(self.subV1_collapsed), self.c_old_collapsed)
-        a_phi = dolfinx.fem.Function(self.subV0_collapsed)
-        a_phi.interpolate(self.phi_expression.eval)
-        a_phi.x.scatter_forward()
-
-        # solve af problem on the adapted mesh
-        res_v = ufl.TestFunction(self.subV0_collapsed)
-        af_residual = src.forms.angiogenic_factors_form_dt(a_af_old, a_af_old, a_phi, a_c_old, res_v,
-                                                           self.sim_parameters,
-                                                           dt=dt_constant)
-        # assemble residual form
-        R_af = dolfinx.fem.petsc.assemble_vector(dolfinx.fem.form(af_residual))
-        R_af.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
-
-        # create connectivity between vertices and edges
-        adapted_mesh.topology.create_connectivity(0, 1)
-
-        # get vertices where the residual of af is higher
-        high_res_vertices, = np.nonzero(np.abs(R_af.array) > self.af_residual_tolerance)  # check higher
-        # get edges connected to vertices where the residual is higher
-        high_res_edges = dolfinx.mesh.compute_incident_entities(adapted_mesh.topology,
-                                                                high_res_vertices.astype(np.int32),
-                                                                0,
-                                                                1)
-        return high_res_edges
-
-    def _get_high_c_gradient_marker(self):
-        """
-        Return a function that marks the edges where the gradient of c is high and, thus, require a refinement.
-        """
-        # compute c_old values at local midpoints in the old mesh
-        n_local_cells_mesh = self.mesh.topology.index_map(self.mesh.topology.dim).size_local
-        local_cells_midpoints_mesh = dolfinx.mesh.compute_midpoints(self.mesh, self.mesh.topology.dim,
-                                                                    range(n_local_cells_mesh))
-        local_c_values_mesh = self.c_old.eval(local_cells_midpoints_mesh,
-                                              np.arange(n_local_cells_mesh)).reshape((n_local_cells_mesh,))
-
-        # broadcast midpoints and c_values over all processes
-        global_cells_midpoints_mesh = comm_world.gather(local_cells_midpoints_mesh, 0)
-        global_c_values_mesh = comm_world.gather(local_c_values_mesh, 0)
-        if rank == 0:
-            global_cells_midpoints_mesh = np.vstack(global_cells_midpoints_mesh)
-            global_c_values_mesh = np.concatenate(global_c_values_mesh)
-        else:
-            global_cells_midpoints_mesh = None
-        global_cells_midpoints_mesh = comm_world.bcast(global_cells_midpoints_mesh, 0)
-        global_c_values_mesh = comm_world.bcast(global_c_values_mesh, 0)
-
-        def marker(adapted_mesh: dolfinx.mesh.Mesh):
-            # get the number of local cells on the adapted mesh
-            n_cells_adapted_mesh = adapted_mesh.topology.index_map(adapted_mesh.topology.dim).size_local
-
-            # get cells colliding with each global midpoint
-            adapted_mesh_bbt = dolfinx.geometry.bb_tree(adapted_mesh, adapted_mesh.topology.dim)
-            cell_candidates = dolfinx.geometry.compute_collisions_points(adapted_mesh_bbt, global_cells_midpoints_mesh)
-            colliding_cells = dolfinx.geometry.compute_colliding_cells(adapted_mesh, cell_candidates,
-                                                                       global_cells_midpoints_mesh)
-
-            # create dictionary of the c_values for each colliding cell
-            c_values_for_cell = {i: [] for i in range(n_cells_adapted_mesh)}
-            for i, c_val in enumerate(global_c_values_mesh):
-                if len(colliding_cells.links(i)) > 0:
-                    c_values_for_cell[colliding_cells.links(i)[0]].append(c_val)
-
-            # get mean c value for each cell
-            mean_c_for_cell = np.array([abs(np.mean(vals_list)) for vals_list in c_values_for_cell.values()])
-
-            # get cells where mean is under or over tolerance
-            far_from_eq_cells, = np.nonzero(
-                (mean_c_for_cell < self.c_gradient_tolerance) | (mean_c_for_cell > (2 - self.c_gradient_tolerance))
-            )
-
-            # get edges connected to vertices where the residual is higher
-            adapted_mesh.topology.create_entities(1)
-            far_from_eq_edges = dolfinx.mesh.compute_incident_entities(adapted_mesh.topology,
-                                                                       far_from_eq_cells.astype(np.int32),
-                                                                       adapted_mesh.topology.dim,
-                                                                       1)
-
-            return far_from_eq_edges
-
-        return marker
-
-    def _get_future_tip_cell_poitions_edges(self, adapted_mesh: dolfinx.mesh.Mesh, mesh_bbt):
-        # get global sampling from TipCellManager
-        n_global_samples = self.tip_cell_manager.mesh_sampling.get_n_global_samples()
-        global_sampling = np.array(self.tip_cell_manager.mesh_sampling.global_sampling)
-
-        # find which global samples are on the current processor
-        cell_candidates = dolfinx.geometry.compute_collisions_points(mesh_bbt, global_sampling)
-        colliding_cells = dolfinx.geometry.compute_colliding_cells(self.mesh, cell_candidates,
-                                                                   global_sampling)
-        is_global_sample_on_proc = np.array([len(colliding_cells.links(i)) > 0 for i in range(n_global_samples)])
-
-        # get points on proc
-        n_points_on_proc = is_global_sample_on_proc.sum()
-        points_on_proc = global_sampling[is_global_sample_on_proc, :]
-
-        # find self.mesh cells colliding with global samples
-        current_cells = [colliding_cells.links(i)[0]
-                         for i, is_p_on_proc in enumerate(is_global_sample_on_proc) if is_p_on_proc]
-
-        # compute af value on proc
-        af_values_on_proc = self.af_old.eval(points_on_proc, current_cells)
-        af_values_on_proc = af_values_on_proc.reshape(af_values_on_proc.shape[0])
-
-        # get which global samples have af values above Tc
-        af_above_Tc = (af_values_on_proc >= self.Tc)
-
-        # compute grad af and its norm
-        grad_af_values = self.grad_af_old.eval(points_on_proc, current_cells)
-        norm_grad_af = np.linalg.norm(grad_af_values, axis=1)
-        norm_grad_af = norm_grad_af.reshape(norm_grad_af.shape[0])
-
-        # find where the norm is above Gm
-        grad_af_above_Gm = (norm_grad_af >= self.Gm)
-
-        # compute the negative versor pointing in the opposite direction of the gradient
-        negative_grad_af_versors = np.zeros(shape=(n_points_on_proc, 3))
-        for i in range(self.spatial_dimension):
-            negative_grad_af_versors[:, i] = -(grad_af_values[:, i] / norm_grad_af)
-
-        # check if there is a vessel in that direction
-        point_close_to_capillary = np.zeros((n_points_on_proc,)).astype(bool)  # init
-        current_cp_close_to_capillary = point_close_to_capillary.copy()
-        for i in range(self.refine_rate):
-            # create current checkpoint
-            current_checkpoints = points_on_proc + (self.tc_mean_speed * negative_grad_af_versors)
-
-            # find which points are on the current processor
-            cell_candidates = dolfinx.geometry.compute_collisions_points(mesh_bbt, current_checkpoints)
-            colliding_cells = dolfinx.geometry.compute_colliding_cells(self.mesh, cell_candidates,
-                                                                       current_checkpoints)
-            is_cell_on_proc = [len(colliding_cells.links(i)) > 0 for i in range(n_points_on_proc)]
-            current_cells = [colliding_cells.links(i)[0]
-                             for i, is_p_on_proc in enumerate(is_cell_on_proc) if is_p_on_proc]
-
-            # cast is_cell_on_proc to np.ndarray
-            is_cell_on_proc = np.array(is_cell_on_proc, dtype=object).astype(bool)
-
-            # find c_value at cells on proc
-            c_value_at_cp_on_proc = self.c_old.eval(current_checkpoints[is_cell_on_proc, :], current_cells)
-
-            # set test variable to False is the point is not on proc
-            current_cp_close_to_capillary[~is_cell_on_proc] = False
-
-            # for the other, set to true is c_value is over 0
-            c_value_at_cp_on_proc = c_value_at_cp_on_proc.reshape((len(current_cells),))
-            current_cp_close_to_capillary[is_cell_on_proc] = c_value_at_cp_on_proc > 0.
-
-            # combine with the one computed at the previous step
-            point_close_to_capillary = current_cp_close_to_capillary | point_close_to_capillary
-
-        # get boolean index of the points on proc respecting all conditions
-        boolean_index_selected_points_on_proc = af_above_Tc & grad_af_above_Gm & point_close_to_capillary
-
-        # get boolean index of the global samples respecting all conditions
-        local_boolean_index_selected_global_samples = np.zeros((n_global_samples,)).astype(bool)
-        local_boolean_index_selected_global_samples[is_global_sample_on_proc] = boolean_index_selected_points_on_proc
-        print(local_boolean_index_selected_global_samples.sum())
-
-        # On Proc 0, get the global boolean index using a logical or
-        list_boolean_indices = comm_world.gather(local_boolean_index_selected_global_samples, 0)
-        if rank == 0:
-            global_boolean_index_selected_global_samples = np.logical_or.reduce(list_boolean_indices)
-        else:
-            global_boolean_index_selected_global_samples = None
-        global_boolean_index_selected_global_samples = comm_world.bcast(global_boolean_index_selected_global_samples, 0)
-
-        # get selected global points
-        selected_global_samples = global_sampling[global_boolean_index_selected_global_samples, :]
-
-        # get cells colliding with the selected global samples
-        _, colliding_cells = fu.get_colliding_cells_for_points(selected_global_samples,
-                                                               adapted_mesh,
-                                                               dolfinx.geometry.bb_tree(adapted_mesh,
-                                                                                        adapted_mesh.topology.dim))
-
-        # get edges connected to colliding cells
-        adapted_mesh.topology.create_connectivity(adapted_mesh.topology.dim, 1)
-        selected_edges = dolfinx.mesh.compute_incident_entities(adapted_mesh.topology,
-                                                                colliding_cells,
-                                                                adapted_mesh.topology.dim,
-                                                                1)
-
-        # return corresponding edges
-        return selected_edges
-
-    def _adapt_mesh(self):
-        """
-        Generate an adaptively refined mesh
-        """
-        # init
-        edges = []  # init edges to refine
-        adapted_mesh = dolfinx.mesh.refine(self.coarse_mesh, edges, redistribute=False)  # init adapted mesh
-        global_len_high_af_res = 1  # init len of edges with high af residual
-        high_res_edges = np.array([])  # init array of edges with high af residual
-
-        # collapse old state (required from some refinement procedures)
-        self.af_old_collapsed = self.af_old.collapse()
-        self.c_old_collapsed = self.c_old.collapse()
-        self.mu_old_collapsed = self.mu_old.collapse()
-
-        # get current mesh bbt
-        mesh_bbt = dolfinx.geometry.bb_tree(self.mesh, self.mesh.topology.dim)
-
-        # get high c_gradient_marker
-        get_high_c_gradient_edges = self._get_high_c_gradient_marker()
-
-        # start refinement
-        logger.info(f"Starting refinement")
-        for refinement_cycle in range(self.max_mesh_refinement_cycles):
-            logging.info(f"time {self.t} | refinement cycle {refinement_cycle}")
-            # -------------------------------------------------------------------------------------------------------- #
-            # Check min h value; if reached the target, stop refining
-            # -------------------------------------------------------------------------------------------------------- #
-            logger.debug(f"Refinement h test")
-            mesh_cells_index_map = adapted_mesh.topology.index_map(adapted_mesh.topology.dim)
-            local_h = adapted_mesh.h(adapted_mesh.topology.dim, range(mesh_cells_index_map.size_local))
-            local_h_min = np.amin(local_h)
-            global_h_min = comm_world.allreduce(local_h_min, MPI.MIN)
-            # order_of_magnitude_global_h_min = 10 ** np.floor(np.log10(global_h_min))
-            if global_h_min < self.mesh_refinement_epsilon:
-                logger.info(
-                    f"O(h) [O({global_h_min})] < epsilon ({self.mesh_refinement_epsilon}): "
-                    f"exit refinement"
-                )
-                break
-            else:
-                logger.info(
-                    f"O(h) [O({global_h_min})] > epsilon ({self.mesh_refinement_epsilon}): "
-                    f"keep refining"
-                )
-
-            # generate adapted function space
-            self._spatial_discretization(adapted_mesh)
-
-            # locate edges to refine for af residual
-            if global_len_high_af_res > 0:
-                high_res_edges = self._get_high_af_residual_edges(adapted_mesh)
-                global_len_high_af_res = comm_world.allreduce(len(high_res_edges), MPI.SUM)
-            far_from_eq_edges = get_high_c_gradient_edges(adapted_mesh)
-            tip_cells_edges = self._get_future_tip_cell_poitions_edges(adapted_mesh, mesh_bbt)
-
-            # merge edges
-            logging.debug(f"af high res edges to refine: {len(high_res_edges)}")
-            logging.debug(f"far from eq edges to refine: {len(far_from_eq_edges)}")
-            logging.debug(f"tip cell edges to refine: {len(tip_cells_edges)}")
-            edges = np.append(high_res_edges, far_from_eq_edges)
-            edges = np.append(edges, tip_cells_edges)
-            edges = np.unique(edges.astype(np.int32))
-
-            # refine mesh
-            logger.debug(f"Mesh refinement")
-            adapted_mesh.topology.create_entities(1)
-            adapted_mesh = dolfinx.mesh.refine(adapted_mesh, edges, redistribute=False)
-
-        # set new mesh
-        self.mesh = adapted_mesh
-
-    def _nmm_interpolate_u_old(self):
-        # interpolate old state on new mesh
-        logger.debug(f"NMM interpolate")
-        a_af_old = nmm_interpolate(dolfinx.fem.Function(self.subV0_collapsed), self.af_old_collapsed)
-        a_c_old = nmm_interpolate(dolfinx.fem.Function(self.subV1_collapsed), self.c_old_collapsed)
-        a_mu_old = nmm_interpolate(dolfinx.fem.Function(self.subV2_collapsed), self.mu_old_collapsed)
-
-        # interpolate phi on the new mesh
-        self.phi = dolfinx.fem.Function(self.subV0_collapsed)
-        self.phi.interpolate(self.phi_expression.eval)
-        self.phi.x.scatter_forward()
-
-        # create u_old to keep all the functions
-        logger.debug(f"Assign to u_old")
-        self.u_old = dolfinx.fem.Function(self.V)
-        self.u_old.x.array[self.collapsedV0_to_V] = a_af_old.x.array
-        self.u_old.x.array[self.collapsedV1_to_V] = a_c_old.x.array
-        self.u_old.x.array[self.collapsedV2_to_V] = a_mu_old.x.array
-        self.u_old.x.scatter_forward()
-
-        # reassign
-        self.af_old, self.c_old, self.mu_old = self.u_old.split()
-
-    def _time_iteration(self, test_convergence: bool = False):
-        # set dt constant
-        self.min_dt = int(np.round(self.sim_parameters.get_value("dt")))
-        self.dt_constant = dolfinx.fem.Constant(self.mesh, dolfinx.default_scalar_type(self.min_dt))
-
-        # init time iteration
-        self.t = int(np.round(self.t0))
-        super()._set_pbar(total=self.steps)
-
-        # init coarse mesh
-        self._generate_coarse_mesh()
-
-        # log
-        logger.info(f"{self.out_folder_name}:Starting time iteration...")
-        # start time iteration
-        while self.t < (self.steps + 1):
-            # update time
-            self.t += self.dt_constant.value
-            logger.info(f"Starting iteration at time {self.t}")
-            logger.debug(f"Current DOFS: {self.V.dofmap.index_map.size_global}")
-
-            # manage tip cells
-            self.tip_cell_manager.activate_tip_cell(self.c_old, self.af_old, self.grad_af_old, self.t)
-            self.tip_cell_manager.revert_tip_cells(self.af_old, self.grad_af_old)
-            self.tip_cell_manager.move_tip_cells(self.c_old, self.af_old, self.grad_af_old)
-
-            # store tip cells in fenics function and json file
-            logger.debug(f"Saving incremental tip cells")
-            self.t_c_f_function = self.tip_cell_manager.get_latest_tip_cell_function()
-            self.t_c_f_function.x.scatter_forward()
-            self.tip_cell_manager.save_incremental_tip_cells(f"{self.report_folder}/incremental_tipcells.json", self.t)
-
-            # if it is time to refine
-            if (self.refine_counter % self.refine_rate) == 0:
-                self._adapt_mesh()  # adapt mesh
-
-                self._spatial_discretization()  # regenerate spatial discretization
-
-                self._nmm_interpolate_u_old()  # regenerate u_old
-
-                # generate u on the adapted mesh
-                self.u = dolfinx.fem.Function(self.V)
-
-                # regenerate the weak form
-                logger.debug(f"Regenerate weak form")
-                self.dt_constant = dolfinx.fem.Constant(self.mesh,                         # regenerate dt constant
-                                                        dolfinx.default_scalar_type(self.dt_constant.value))
-                af, c, mu = ufl.split(self.u)
-                v1, v2, v3 = ufl.TestFunctions(self.V)
-                af_form = src.forms.angiogenic_factors_form_dt(af, self.af_old, self.phi, c, v1, self.sim_parameters,
-                                                               dt=self.dt_constant)
-                capillaries_form = src.forms.angiogenesis_form_no_proliferation(
-                    c, self.c_old, mu, self.mu_old, v2, v3, self.sim_parameters, dt=self.dt_constant)
-                form = af_form + capillaries_form
-
-                # define problem
-                logger.info(f"Regenerating problem")
-                problem = dolfinx.fem.petsc.NonlinearProblem(form, self.u)
-
-                # define solver
-                logger.info(f"Regenerating solver")
-                self.solver = NewtonSolver(comm_world, problem)
-                self.solver.report = True  # report iterations
-                # set options for krylov solver
-                opts = PETSc.Options()
-                option_prefix = self.solver.krylov_solver.getOptionsPrefix()
-                for o, v in self.lsp.items():
-                    opts[f"{option_prefix}{o}"] = v
-                self.solver.krylov_solver.setFromOptions()
-
-            self.refine_counter += 1  # update refine counter
-
-            self._solve_problem()  # solve problem
-
-            # assign to old
-            logger.debug(f"Updating u_old")
-            self.u_old.x.array[:] = self.u.x.array
-            self.u_old.x.scatter_forward()
-            self.af_old, self.c_old, self.mu_old = self.u_old.split()
-            # assign new value to grad_af_old
-            self.grad_af_old = dolfinx.fem.Function(self.vec_V)
-            project(ufl.grad(self.af_old), target_func=self.grad_af_old)
-            # assign new value to phi
-            self.phi_expression.update_time(self.t)
-            self.phi.interpolate(self.phi_expression.eval)
-            self.phi.x.scatter_forward()
-            # update mesh of tip cell manager
-            self.tip_cell_manager.update_mesh(self.mesh)
-
-            # save
-            if (self.t % self.save_rate == 0) or (self.t == self.steps) or self.runtime_error_occurred:
-                self.t_c_f_function = dolfinx.fem.Function(self.subV0_collapsed)
-                self._write_files(self.t, write_mesh=self.mesh)
-
-            if self.runtime_error_occurred:
-                break
-
-            # update progress bar
-            self.pbar.update(self.dt_constant.value)
-
-
 class RHTestTipCellActivation(RHSimulation):
     def __init__(self,
                  spatial_dimension: int,
@@ -1464,6 +1097,9 @@ class RHTestTipCellActivation(RHSimulation):
         self.df_standard_params: pd.DataFrame = self.sim_parameters.as_dataframe()
 
     def setup(self):
+        """
+        Setup simulation for tip cell activation
+        """
         self._check_simulation_properties()  # Check class proprieties. Return error if something does not work.
 
         self._sim_mkdir()  # create all simulation folders
@@ -1491,12 +1127,14 @@ class RHTestTipCellActivation(RHSimulation):
         if find_min_tdf_i:
             assert "tdf_i" not in self.params_dictionary.keys(), "Cannot set tdf_i while looking for the min value"
 
-        # generate column name
+        # generate column name for the output csv
         columns_name = ["tip_cell_activated",
                         *[f"{k} (range: [{np.amin(r)}, {np.amax(r)}])" for k, r in self.params_dictionary.items()]]
 
+        # generate dataframe collecting the activation tiles (True/False for each condition)
         tip_cell_activation_df = self._setup_output_dataframe(columns_name, append_result_to_csv)
 
+        # if required, generate dataframe collecting the minimal RH dimension
         if find_min_tdf_i:
             min_tdf_i_df = self._setup_output_dataframe(columns_name, None)
         else:
@@ -1564,6 +1202,9 @@ class RHTestTipCellActivation(RHSimulation):
         return self.runtime_error_occurred
 
     def _find_min_tdf_i(self, current_sim_parameters, min_tdf_i: float = 0., max_tdf_i: float = 1.):
+        """
+        Find min dimension for RH for the given parameters combination
+        """
         if max_tdf_i - min_tdf_i < 0.05:
             return max_tdf_i
         else:
