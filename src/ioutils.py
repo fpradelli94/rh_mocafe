@@ -116,7 +116,6 @@ def move_files_once_per_node(src_folder: Path, dst: Path):
     """
     logger.info(f"Starting iteration on {src_folder} (type:{type(src_folder)})")
     for f in src_folder.iterdir():
-        logger.info(f"Moving {f} to {dst}")
         shutil.move(src=str(f), dst=str(dst))
 
 
