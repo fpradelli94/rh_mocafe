@@ -1,7 +1,6 @@
 """
 Contains methods and classes to run simulations in 2D and 3D
 """
-import sys
 import time
 import shutil
 import logging
@@ -234,7 +233,7 @@ class RHSimulation:
         if (self.slurm_job_id is not None) and (rank == 0):
             self.pbar_file = open(f"slurm/{self.slurm_job_id}pbar.o", 'w')
         else:
-            self.pbar_file = sys.stdout
+            self.pbar_file = open(f"temp_pbar.o", "w")
 
     def _check_simulation_properties(self):
         """
@@ -419,7 +418,7 @@ class RHSimulation:
         logger.info("Ending simulation... ")
 
         # close pbar file
-        if (rank == 0) and (self.slurm_job_id is not None):
+        if (rank == 0):
             self.pbar_file.close()
 
         # save sim report
@@ -697,7 +696,7 @@ class RHTimeSimulation(RHSimulation):
         # define test functions
         v1, v2, v3 = ufl.TestFunctions(self.V)
         # build total form
-        af_form = src.forms.angiogenic_factors_form_dt(af, self.af_old, self.phi, c, v1, self.sim_parameters)
+        af_form = src.forms.angiogenic_factors_form_eq(af, self.phi, c, v1, self.sim_parameters)
         capillaries_form = src.forms.angiogenesis_form_no_proliferation(
             c, self.c_old, mu, self.mu_old, v2, v3, self.sim_parameters)
         form = af_form + capillaries_form
@@ -708,8 +707,6 @@ class RHTimeSimulation(RHSimulation):
 
         # define solver
         self.solver = NewtonSolver(comm_world, problem)
-        # Set Newton solver options
-        self.solver.convergence_criterion = "incremental"
         self.solver.max_it = 100
         self.solver.report = True  # report iterations
         # set options for krylov solver
@@ -755,7 +752,12 @@ class RHTimeSimulation(RHSimulation):
             # solve
             logger.debug(f"Solving problem...")
             try:
-                self.solver.solve(u)
+                n_iterations, converged = self.solver.solve(u)
+                logger.debug(f"Solver ended with n_interations: {n_iterations}; converged: {converged}")
+                if n_iterations == 0:
+                    raise RuntimeError("Newton Solver converged in 0 iteration.")
+                if not converged:
+                    raise RuntimeError("Newton Solver did not converge.")
             except RuntimeError as e:
                 # store error info
                 self.runtime_error_occurred = True
