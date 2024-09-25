@@ -1,11 +1,4 @@
 # Simulating Retinal Hemangioblastoma with DOLFINx and Mocafe
-
-<p align="center">
-  <img src=".thumbs/MovieS1.gif" />
-</p>
-
-**************************************************************************
-
 The materials contained in this folder allow the reproduction of the simulations of RH development
 and angiogenesis with DOLFINx and Mocafe.
 
@@ -15,7 +8,7 @@ To ensure full reproducibility, we recommend to use [Singularity](https://github
 
 ```shell
 # pull container
-singularity singularity push mocafex.sif library://fpradelli94/mocafex/mocafex:dev
+singularity pull mocafex.sif library://fpradelli94/mocafex/mocafex:latest
 # execute main in the container
 singularity exec mocafex.sif python3 main.py
 ```
@@ -57,32 +50,21 @@ The result of a simulation is a folder with the following structure:
 .
 ├── 0_reproduce
 ├── sim_info
-├── af.h5
-├── af.xdmf
-├── c.h5
-├── c.xdmf
-├── grad_af.h5
-├── grad_af.xdmf
-├── phi.h5
-├── phi.xdmf
-├── resume
-├── sim_info
-├── tipcells.h5
-└── tipcells.xdmf
+└── pvd
 ```
-Where the `*.xdmf` and `*.h5` files are the actual simulation outputs. More precisely:
+Where the `pvd` foldar contains the simulation output. More precisely:
 
 | Files                            | Content                                       |
 |----------------------------------|-----------------------------------------------|
-| `af.xdmf`, `af.h5`               | Angiogenic Factors (AFs) distribution in time |
-| `c.xdmf`, `c.h5`                 | Capillaries field in time                     |
-| `grad_af.xdmf`, `grad_af.h5`     | Gradient of the AFs distribution in time      |
-| `phi.xdmf`, `phi.h5`             | Retinal Hemangioblastoma phase field in time  |
-| `tipcells.xdmf`, `tipcells.xdmf` | Tip Cells phase field in time                 |
+| `af.pvd`               | Angiogenic Factors (AFs) distribution in time |
+| `c.pvd`                 | Capillaries field in time                     |
+| `grad_af.pvd`     | Gradient of the AFs distribution in time      |
+| `phi.pvd`             | Retinal Hemangioblastoma phase field in time  |
+| `tipcells.pvd` | Tip Cells phase field in time                 |
 
 You can load these file in ParaView to visualize them. [^1]
 
-There are also three additional folders:
+There are also two additional folders:
 - `0_reproduce` contains a copy of the script used to generate the simulation. 
 Useful to check the exact code used to generate the results.
 - `sim_info` contains:
@@ -94,9 +76,7 @@ Useful to check the exact code used to generate the results.
 
 ## GitHub and Zenodo [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.7330072.svg)](https://doi.org/10.5281/zenodo.7330072)
 
-This repository is available both on GitHub or on Zenodo. The GitHub version is meant to clone and reproduce the 
-results. On the Zenodo repository, you can access to the generated outputs of the code, and the simulation 
-results that we used in our manuscript. See the section "Repository folders" (below) for additional info.
+This repository is available both only on GitHub. On Zenodo, you can find the output of the simulations we performed for the manuscript. 
 
 ## Structure of this repository
 This repository contains several folders:
@@ -106,7 +86,6 @@ This repository contains several folders:
 ├── input_patients_data
 ├── notebooks
 ├── saved_sim
-├── saved_sim_archive # only on Zenodo
 ├── src
 └── visualization
 ```
@@ -128,34 +107,10 @@ The output of the notebook is in `notebooks/out`. You can generate it running th
 This folder will be generated at the first simulation and will contain the simulation files, if you run some 
 simulations.
 
-### :file_folder: `saved_sim_archive`
-Contains the results of the simulations shown in the manuscript in Figure 2 and Figure 4. Available only on Zenodo. 
-
-The recommended way to visualize the simulation result is [ParaView](https://www.paraview.org/). [^1]
-
-Also, you can consider using the visualization script provided in `visualization` subfolder.
-
 ### :file_folder: `src`
 Contains the source code used in the `main.py` script. 
 
 ### :file_folder: `visualization`
-Contains scripts and data related to the results' visualization. There are two sub-folders: `paraview` and `python`
-
-1. `paraview`
-
-Contains a script, `section.py`, to visualize a simulation in 3D with [ParaView](https://www.paraview.org/). 
-It is the same used to generate the thumbnail of this `README`. It only works with 3D simulations and with ParaView >5.9.0.
-
-To use the script, open ParaView and, on the View tab, select "Python Shell". 
-A new window will appear with a button "Run Script". Press the button and select the file `section.py`.
-
-If the script runs correctly, it will ask for two inputs: the absolute paths of the simulation's `c.xdmf` file 
-and of the `phi.xdmf` file. Copy and paste them in the box that will appear and let ParaView handle the rest.
-
-It might take some minutes to display the result.
-
-2. `python`
-
 Contains the scripts used to produce some plots reported in the manuscript. More precisely, there are:
 
 - `activation_tiles.py`, which generates a tiles plot of the parameters leading to angiognesis (Fig. 3 of the manuscript)
@@ -164,7 +119,7 @@ using the table `sim_index.csv`.
 manuscript).
 
 ## Meta
-Franco Pradelli (franco.pradelli94@gmail.com), Giovanni Minervini, and Silvio Tosatto  
+Franco Pradelli (franco.pradelli94@gmail.com), Giovanni Minervini, Shorya Azad, Pradeep Venkatesh, and Silvio Tosatto  
 
 ## License
 This work is licensed under the Creative Commons Attribution-NonCommercial 4.0 International License. 
