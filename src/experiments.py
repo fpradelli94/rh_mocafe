@@ -50,7 +50,7 @@ def preamble():
         distributed_data_folder = "temp"
     else:
         spatial_dimension = 3
-        distributed_data_folder = "/local/frapra/3drh"
+        distributed_data_folder = "/mnt/ssd14tb/frapra/3drh"
 
     return sim_parameters, patients_parameters, args.slurm_job_id, spatial_dimension, distributed_data_folder
 
@@ -106,21 +106,34 @@ def vascular_sprouting_full_volume(patient: str, n_steps: int = None):
     V_uc_af_min = float(sim_parameters_df.loc["V_d_af", "sim_range_min"])
     V_uc_value = V_uc_af_min
     sim_parameters.set_value("V_uc_af", V_uc_value)
+    
+    alpha_p = sim_parameters.get_value("alpha_p")
+    sim_parameters.set_value("alpha_p", 0.6 * alpha_p)
+
     # set n steps
-    n_steps = 300 if n_steps is None else n_steps
+    n_steps = 100 if n_steps is None else n_steps
+    # set save rate
+    save_rate = 25
+    # set linear solver parameters
+    lsp = {
+        "ksp_type": "gmres",
+        "pc_type": "asm",
+        "ksp_monitor": None
+    }
 
     # create sim object
     sim = RHTimeSimulation(spatial_dimension=spatial_dimension,
                            sim_parameters=sim_parameters,
                            patient_parameters=patients_parameters[patient],
                            steps=n_steps,
-                           save_rate=50,
-                           out_folder_name=f"dolfinx_{patient}_full_volume_V_uc{V_uc_value:.2g}",
+                           save_rate=save_rate,
+                           out_folder_name=f"dolfinx_{patient}_full_volume_V_uc{V_uc_value:.2g}_final",
                            sim_rationale=f"Simulation for representative case of {patient} with tdf_i = "
-                                             f"{1}; V_pT_af = ({V_pT_af_max:.2e}) and V_uc_af = "
-                                             f"{V_uc_value:.2e} [1 / tau]",
+                                         f"{1}; V_pT_af = ({V_pT_af_max:.2e}) and V_uc_af = "
+                                         f"{V_uc_value:.2e} [1 / tau]",
                            slurm_job_id=slurm_job_id,
                            save_distributed_files_to=distributed_data_folder)
+    sim.lsp = lsp
     # run simulation
     sim.run()
 
@@ -223,7 +236,7 @@ def time_adaptive_vascular_sprouting_full_volume_1yr(patient: str):
     sim_parameters.set_value("V_uc_af", V_uc_value)
     # set M
     M_val = sim_parameters.get_value("M")
-    sim_parameters.set_value("M", M_val / 2)
+    sim_parameters.set_value("M", M_val / 10)
     # set n steps
     n_steps = 20_215
     sim = RHAdaptiveSimulation(spatial_dimension=spatial_dimension,
