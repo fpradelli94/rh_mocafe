@@ -74,7 +74,7 @@ Useful to check the exact code used to generate the results.
   - `sim_parameters.csv`: the parameters used in the simulation.
   - `patient_parameters.json`: the patient-specific parameters for the given simulation
 
-## Zenodo [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.7330072.svg)](https://doi.org/10.5281/zenodo.13842747)
+## Zenodo [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.13842747.svg)](https://doi.org/10.5281/zenodo.13842747)
 
 The output of the simulations included in the manuscript is available on Zenodo as a compressed archive (`tar.gz`). Each simulation is stored in a separate folder and the output is stored as `.xdmf` file. 
 
